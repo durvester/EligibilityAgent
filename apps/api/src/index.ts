@@ -1,10 +1,11 @@
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
-
-// Load .env from monorepo root
-const __dirname = dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: resolve(__dirname, '../../../.env') });
+// Load .env from monorepo root (only in development - production uses Fly secrets)
+if (process.env.NODE_ENV !== 'production') {
+  const dotenv = await import('dotenv');
+  const { fileURLToPath } = await import('url');
+  const { dirname, resolve } = await import('path');
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  dotenv.default.config({ path: resolve(__dirname, '../../../.env') });
+}
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
