@@ -26,6 +26,9 @@ apps/api/             # Fastify backend
 packages/shared/      # TypeScript types and constants
 packages/db/          # Prisma schema and client
 Documentation/        # Reference documentation
+fly.api.toml          # Fly.io API config
+fly.web.toml          # Fly.io Web config
+ROADMAP.md            # Feature roadmap with epics
 ```
 
 ---
@@ -118,7 +121,7 @@ const practitionerId = match?.[1]; // "627b9ead-07b0-4ce3-9a15-474993cfbaa7"
 | `apps/api/src/routes/auth.ts` | SMART OAuth with dynamic discovery |
 | `apps/api/src/routes/agent.ts` | SSE endpoint for eligibility agent |
 | `apps/api/src/routes/fhir.ts` | FHIR proxy (requires headers) |
-| `apps/api/src/services/agent/loop.ts` | Agent loop using Claude Agent SDK |
+| `apps/api/src/services/agent/loop.ts` | Agent loop using direct Anthropic SDK |
 | `apps/api/src/services/agent/tools.ts` | Tool definitions (JSON schema) |
 | `apps/api/src/services/agent/executor.ts` | Tool execution dispatch |
 | `apps/api/src/services/agent/prompt.ts` | System prompt and data context builder |
@@ -213,22 +216,31 @@ data: {"type":"complete","eligibilityResult":{...},"summary":"# Eligibility Summ
 
 ## What's Not Done Yet
 
-See `SPECIFICATION.md` Section 6.2 for full list.
+See `ROADMAP.md` for detailed feature roadmap with epics and stories.
+See `SPECIFICATION.md` Section 6.2 for implementation status.
 
-High priority:
-- Database deployment (PostgreSQL instance needed)
-- Practice Fusion proprietary API integration (insurance write-back)
+**High Priority (Roadmap Phase 1-2):**
+- Extended thinking API enablement
+- Agent state machine with structured output
+- Multi-turn selection handling (NPI/payer/insurance disambiguation)
+- Tool use ID tracking for proper matching
 
-Medium priority:
+**Medium Priority:**
 - Payer mapping database persistence (schema ready, service not implemented)
+- Summary preview during execution (not just on complete)
+- Source attribution as structured data (not embedded in text)
 
-Low priority:
+**Low Priority:**
+- Practice Fusion proprietary API integration (insurance write-back)
 - Eligibility history UI
 - Audit logging
 - Agent evaluations
 
 ## What's Done
 
+- **Deployment**: Fly.io with auto-deploy via GitHub Actions
+- **Custom domains**: eligibility.practicefusionpm.com + api subdomain with SSL
+- **Agent rewrite**: Direct Anthropic SDK (removed Claude Agent SDK dependency)
 - PDF download: Client-side via browser print (no server-side PDF generation needed)
 - Agent summary generation: Agent creates markdown summary with source attribution
 - Discrepancy detection: Agent compares input vs Stedi response and flags mismatches
@@ -287,10 +299,10 @@ Low priority:
    - Direct API calls from frontend (bypasses Next.js proxy which buffers SSE)
    - Uses `NEXT_PUBLIC_API_URL` environment variable for API endpoint
 
-2. **Claude Agent SDK Integration**:
-   - Using `@anthropic-ai/claude-agent-sdk` with streaming input mode for MCP tools
+2. **Anthropic SDK Integration**:
+   - Using `@anthropic-ai/sdk` with direct messages API and tool use
    - Tool use ID to name tracking for matching tool_start/tool_end events
-   - Extended thinking support with `maxThinkingTokens` configuration
+   - Agentic loop with conversation history and tool result handling
 
 3. **Agent Trace Panel**:
    - Real-time display of agent reasoning (thinking blocks)
@@ -363,3 +375,42 @@ Low priority:
 7. **Raw Response Exposed**:
    - `rawResponse` now passed through from Stedi service → executor → agent loop → UI
    - Available in "Raw JSON" tab for debugging/verification
+
+### Session 5: Deployment & Roadmap (Jan 2026)
+
+1. **Fly.io Deployment**:
+   - API deployed to `eligibility-api` at https://api.eligibility.practicefusionpm.com
+   - Web deployed to `eligibility-web` at https://eligibility.practicefusionpm.com
+   - PostgreSQL database attached (`eligibility-db`)
+   - SSL certificates auto-provisioned
+
+2. **GitHub Actions CI/CD**:
+   - `.github/workflows/deploy.yml` created
+   - Auto-deploys on push to `main` branch
+   - Deploys API first, then Web (Web depends on API)
+   - Build args for Next.js public URLs
+
+3. **Agent SDK Rewrite**:
+   - **CRITICAL**: `@anthropic-ai/claude-agent-sdk` spawns Claude Code CLI as subprocess
+   - This doesn't work in Docker (Claude Code binary not available)
+   - Rewrote `loop.ts` to use `@anthropic-ai/sdk` directly with messages API
+   - Agentic loop: message → tool_use → execute → tool_result → repeat until done
+
+4. **Docker Builds**:
+   - Multi-stage Dockerfiles for both API and Web
+   - pnpm monorepo requires copying workspace-level node_modules
+   - Next.js uses `output: 'standalone'` for smaller images
+   - API Dockerfile copies `apps/api/node_modules` (pnpm hoisting)
+
+5. **Configuration Files Created**:
+   - `fly.api.toml` - API app config (root level)
+   - `fly.web.toml` - Web app config (root level)
+   - `apps/api/Dockerfile` - API container
+   - `apps/web/Dockerfile` - Web container
+   - `.github/workflows/deploy.yml` - CI/CD pipeline
+
+6. **Roadmap Created** (`ROADMAP.md`):
+   - Documents current issues and severity
+   - 6 epics covering state machine, multi-turn, thinking, attribution, UX, errors
+   - 4-phase timeline with prioritized stories
+   - Technical debt tracking

@@ -1,0 +1,229 @@
+# Eligibility Agent Roadmap
+
+## Current State Assessment
+
+### What's Working
+- **Token Management**: AES-256-GCM encrypted storage in PostgreSQL with auto-refresh 5 minutes before expiration
+- **FHIR Integration**: Patient, Coverage, Practitioner data extraction from Practice Fusion
+- **Agent Tool Execution**: NPI lookup, payer search, eligibility checks via Stedi
+- **Basic SSE Streaming**: Events flow from agent to UI
+- **Deployment**: Fly.io with GitHub Actions auto-deploy
+
+### Critical Issues Identified
+
+| Issue | Severity | Impact |
+|-------|----------|--------|
+| Summary only on `complete` event | HIGH | Users wait for entire agent run to see results |
+| Extended thinking not enabled | HIGH | Agent can't reason deeply about complex problems |
+| No structured multi-turn input | HIGH | Can't handle ambiguous scenarios (multiple NPIs, multiple insurances) |
+| Source attribution embedded in text | MEDIUM | No verification or highlighting of source |
+| Tool matching by name not ID | MEDIUM | Wrong grouping if same tool called twice |
+| No agent state machine | MEDIUM | Users don't know what phase agent is in |
+
+---
+
+## Epics & Stories
+
+### Epic 1: Agent State Machine & Structured Output
+**Goal**: Define explicit agent states and structured responses for each state.
+
+#### Story 1.1: Define Agent States
+```
+States:
+- ANALYZING: Agent reviewing provided data
+- NEED_SELECTION: Agent needs user to choose from options
+- NEED_INPUT: Agent needs additional information
+- EXECUTING: Agent performing tool calls
+- COMPLETED: Eligibility check complete
+- ERROR: Something went wrong
+```
+
+#### Story 1.2: Structured Output Schema
+```typescript
+interface AgentResponse {
+  state: AgentState;
+  // For NEED_SELECTION
+  selection?: {
+    field: 'provider_npi' | 'payer' | 'insurance_plan';
+    options: Array<{ id: string; label: string; details: Record<string, unknown> }>;
+    prompt: string;
+  };
+  // For NEED_INPUT
+  inputRequest?: {
+    fields: Array<{ name: string; label: string; type: 'text' | 'date' | 'select'; required: boolean }>;
+    prompt: string;
+  };
+  // For COMPLETED
+  result?: {
+    summary: string;
+    source: { payer: string; timestamp: string; responseId: string };
+    eligibility: EligibilityResponse;
+    discrepancies: DiscrepancyReport;
+  };
+}
+```
+
+#### Story 1.3: Update System Prompt for State Machine
+- Agent MUST output state in every response
+- Agent MUST use structured format for selections
+- Agent MUST NOT use free text for user interaction
+
+---
+
+### Epic 2: Multi-Turn Selection Handling
+**Goal**: Handle scenarios where agent finds multiple valid options.
+
+#### Story 2.1: Multiple NPI Resolution
+- When `search_npi` returns multiple providers, agent enters `NEED_SELECTION` state
+- UI renders selection cards with provider details (name, specialty, address)
+- User selection is sent back to agent as structured input
+- Agent continues with selected NPI
+
+#### Story 2.2: Multiple Insurance Plans from Discovery
+- When `discover_insurance` returns multiple plans, agent enters `NEED_SELECTION` state
+- UI renders insurance cards (medical, dental, vision separated)
+- User can select which plan to check
+- Agent runs eligibility on selected plan
+
+#### Story 2.3: Payer Ambiguity Resolution
+- When `search_payers` returns multiple matches, agent enters `NEED_SELECTION` state
+- UI shows payer options with IDs
+- User selects correct payer
+- Agent saves mapping and continues
+
+---
+
+### Epic 3: Enhanced Thinking & Reasoning
+**Goal**: Enable and display Claude's extended thinking.
+
+#### Story 3.1: Enable Extended Thinking in API
+```typescript
+const response = await client.messages.create({
+  model: 'claude-sonnet-4-20250514',
+  max_tokens: 8192,
+  thinking: {
+    type: 'enabled',
+    budget_tokens: 10000,
+  },
+  // ...
+});
+```
+
+#### Story 3.2: Stream Thinking Blocks Properly
+- Emit thinking blocks as they arrive (not just at end)
+- Include thinking phase indicator (initial analysis vs. tool result analysis)
+- Add sequence numbers to thinking blocks
+
+#### Story 3.3: Thinking Display Improvements
+- Auto-scroll to latest content
+- Show thinking as expandable cards
+- Indicate when agent is "thinking" vs "executing"
+
+---
+
+### Epic 4: Source Attribution & Verification
+**Goal**: Make source attribution explicit and verifiable.
+
+#### Story 4.1: Structured Source in Response
+```typescript
+interface SourceAttribution {
+  payer: string;
+  payerId: string;
+  timestamp: string;
+  transactionId: string;
+  responseFormat: 'X12_271';
+  stediRequestId?: string;
+}
+```
+
+#### Story 4.2: UI Source Display
+- Dedicated "Source" section in results
+- Show payer name, check timestamp, transaction ID
+- Link to raw response tab
+- "Verified via Stedi API" badge
+
+#### Story 4.3: Raw Response Viewer Enhancement
+- Syntax highlighted JSON
+- Collapsible sections for large responses
+- Copy button for support tickets
+
+---
+
+### Epic 5: UX Polish & State Visibility
+**Goal**: Users always know what's happening.
+
+#### Story 5.1: Agent Journey Progress
+- Visual stepper showing: Analyzing → Verifying → Checking → Complete
+- Current step highlighted with animation
+- Estimated time remaining (based on typical durations)
+
+#### Story 5.2: Tool Use ID Tracking
+- Include `toolUseId` in `tool_start` and `tool_end` events
+- Match tool results correctly even with parallel calls
+- Show tool execution duration
+
+#### Story 5.3: Summary Preview During Execution
+- Show partial summary as soon as eligibility result arrives
+- Update summary as agent analyzes
+- Final polish when `complete` event arrives
+
+#### Story 5.4: Auto-Scroll Trace Panel
+- Scroll to newest step automatically
+- "Jump to latest" button when user scrolls up
+- Sticky header showing current activity
+
+---
+
+### Epic 6: Error Handling & Recovery
+**Goal**: Graceful handling of failures with recovery options.
+
+#### Story 6.1: Retry Mechanisms
+- Retry failed tool calls with exponential backoff
+- User-initiated retry for specific tools
+- "Try different payer" option on eligibility failure
+
+#### Story 6.2: Partial Results
+- Show what we learned even if eligibility check fails
+- Display NPI verification results
+- Show payer search results
+
+#### Story 6.3: Error State UI
+- Clear error messages with suggested actions
+- "Contact support" with pre-filled context
+- Option to start over or retry specific step
+
+---
+
+## Priority & Timeline
+
+### Phase 1: Critical Fixes (Sprint 1)
+1. Story 3.1: Enable Extended Thinking
+2. Story 4.1: Structured Source Attribution
+3. Story 5.2: Tool Use ID Tracking
+4. Story 5.4: Auto-Scroll Trace Panel
+
+### Phase 2: State Machine (Sprint 2)
+1. Story 1.1: Define Agent States
+2. Story 1.2: Structured Output Schema
+3. Story 1.3: Update System Prompt
+4. Story 5.1: Agent Journey Progress
+
+### Phase 3: Multi-Turn Selection (Sprint 3)
+1. Story 2.1: Multiple NPI Resolution
+2. Story 2.2: Multiple Insurance Plans
+3. Story 2.3: Payer Ambiguity Resolution
+
+### Phase 4: Polish (Sprint 4)
+1. Story 5.3: Summary Preview
+2. Story 6.1: Retry Mechanisms
+3. Story 6.2: Partial Results
+4. Story 6.3: Error State UI
+
+---
+
+## Technical Debt
+
+- Remove `@anthropic-ai/claude-agent-sdk` dependency (no longer used)
+- Add DEFAULT_TENANT_ID setup for database foreign key constraint
+- Add scheduled cleanup for expired tokens
+- Persist payer mappings to database (schema ready, service not implemented)

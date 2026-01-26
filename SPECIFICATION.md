@@ -649,7 +649,139 @@ EligibilityAgent/
 
 ---
 
-## 12. Open Questions
+## 12. Deployment
+
+### 12.1 Infrastructure (Fly.io)
+
+The application is deployed to Fly.io with automatic CI/CD via GitHub Actions.
+
+| Component | Fly App | URL |
+|-----------|---------|-----|
+| Web (Next.js) | `eligibility-web` | https://eligibility.practicefusionpm.com |
+| API (Fastify) | `eligibility-api` | https://api.eligibility.practicefusionpm.com |
+| PostgreSQL | `eligibility-db` | Attached to API |
+
+### 12.2 Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `fly.api.toml` | Fly configuration for API (root level) |
+| `fly.web.toml` | Fly configuration for Web (root level) |
+| `apps/api/Dockerfile` | API container build |
+| `apps/web/Dockerfile` | Web container build (Next.js standalone) |
+| `.github/workflows/deploy.yml` | GitHub Actions auto-deploy on push to main |
+
+### 12.3 Deployment Commands
+
+```bash
+# Manual deploy API
+flyctl deploy --config fly.api.toml --remote-only
+
+# Manual deploy Web
+flyctl deploy --config fly.web.toml --remote-only \
+  --build-arg NEXT_PUBLIC_APP_URL=https://eligibility.practicefusionpm.com \
+  --build-arg NEXT_PUBLIC_API_URL=https://api.eligibility.practicefusionpm.com
+
+# View logs
+flyctl logs --app eligibility-api
+flyctl logs --app eligibility-web
+
+# SSH into machine
+flyctl ssh console --app eligibility-api
+
+# Database console
+flyctl postgres connect -a eligibility-db
+```
+
+### 12.4 Secrets (Fly.io)
+
+All secrets set via `flyctl secrets set --app <app>`:
+
+**API Secrets:**
+- `ANTHROPIC_API_KEY`
+- `STEDI_API_KEY`
+- `PF_CLIENT_ID`
+- `PF_CLIENT_SECRET`
+- `PF_SCOPES`
+- `ENCRYPTION_KEY`
+- `DATABASE_URL` (auto-attached from PostgreSQL)
+- `CORS_ORIGIN`
+- `NEXT_PUBLIC_APP_URL`
+
+**Web Secrets:**
+- Set at build time via `--build-arg` in deploy workflow
+
+---
+
+## 13. Roadmap
+
+See `ROADMAP.md` for detailed feature roadmap including:
+
+### 13.1 Current Issues
+
+| Issue | Severity | Impact |
+|-------|----------|--------|
+| Summary only on `complete` event | HIGH | Users wait for entire agent run to see results |
+| Extended thinking not enabled | HIGH | Agent can't reason deeply about complex problems |
+| No structured multi-turn input | HIGH | Can't handle ambiguous scenarios (multiple NPIs, multiple insurances) |
+| Source attribution embedded in text | MEDIUM | No verification or highlighting of source |
+| Tool matching by name not ID | MEDIUM | Wrong grouping if same tool called twice |
+| No agent state machine | MEDIUM | Users don't know what phase agent is in |
+
+### 13.2 Planned Epics
+
+1. **Agent State Machine & Structured Output** - Explicit states, structured responses
+2. **Multi-Turn Selection Handling** - NPI disambiguation, insurance plan selection, payer resolution
+3. **Enhanced Thinking & Reasoning** - Extended thinking API, streaming thinking blocks
+4. **Source Attribution & Verification** - Structured source data, verification badges
+5. **UX Polish & State Visibility** - Journey progress, tool ID tracking, preview summaries
+6. **Error Handling & Recovery** - Retry mechanisms, partial results, recovery options
+
+### 13.3 Agent State Machine (Planned)
+
+```typescript
+// Planned agent states
+type AgentState =
+  | 'ANALYZING'      // Reviewing provided data
+  | 'NEED_SELECTION' // User must choose from options
+  | 'NEED_INPUT'     // Additional information required
+  | 'EXECUTING'      // Performing tool calls
+  | 'COMPLETED'      // Eligibility check complete
+  | 'ERROR';         // Something went wrong
+
+// Structured response for selections
+interface SelectionRequest {
+  field: 'provider_npi' | 'payer' | 'insurance_plan';
+  options: Array<{
+    id: string;
+    label: string;
+    details: Record<string, unknown>;
+  }>;
+  prompt: string;
+}
+
+// Agent response structure
+interface AgentResponse {
+  state: AgentState;
+  selection?: SelectionRequest;      // For NEED_SELECTION
+  inputRequest?: InputRequest;       // For NEED_INPUT
+  result?: EligibilityResult;        // For COMPLETED
+}
+```
+
+---
+
+## 14. Technical Debt
+
+- Remove unused dependencies (cleanup package.json)
+- Add `DEFAULT_TENANT_ID` setup for database foreign key constraint
+- Add scheduled cleanup for expired tokens
+- Persist payer mappings to database (schema ready, service not implemented)
+- Add tool use ID tracking for proper matching
+
+---
+
+## 15. Open Questions
 
 1. **Practice Fusion proprietary API** - Need documentation for insurance write-back and document upload endpoints
 2. **Stedi payer list** - Should we query Stedi's payer list API for better mapping?
