@@ -2,9 +2,11 @@
  * Agent Loop for the Eligibility Agent
  *
  * Uses Anthropic SDK directly with tool use for eligibility verification.
+ * Persists agent runs to database for history and debugging.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { prisma } from '@eligibility-agent/db';
 import type {
   AgentInput,
   AgentEvent,
@@ -15,6 +17,7 @@ import type {
 
 import { ELIGIBILITY_SYSTEM_PROMPT, buildDataContext, AGENT_LIMITS } from './prompt.js';
 import { executeTool } from './executor.js';
+import { serviceLogger } from '../../lib/logger.js';
 
 /**
  * Parsed agent output structure
@@ -26,7 +29,17 @@ interface AgentOutput {
   rawResponse?: unknown;
 }
 
+/**
+ * Context for running the agent (includes session for persistence)
+ */
+export interface AgentContext {
+  tenantId: string;
+  sessionId?: string;
+  patientFhirId: string;
+}
+
 // Tool definitions for Anthropic API
+// Note: Payer mapping tools removed - agent uses search_payers and its knowledge
 const TOOLS: Anthropic.Tool[] = [
   {
     name: 'lookup_npi',
@@ -64,36 +77,12 @@ const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: 'get_payer_mapping',
-    description: 'Check if we have a known Stedi payer ID mapping for this payer name. Check this before searching.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        payerName: { type: 'string', description: 'Payer name to lookup' },
-      },
-      required: ['payerName'],
-    },
-  },
-  {
-    name: 'save_payer_mapping',
-    description: 'Save a successful payer name to Stedi ID mapping for future use.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        payerName: { type: 'string', description: 'Original payer name from FHIR/user' },
-        stediPayerId: { type: 'string', description: 'Stedi payer ID that worked' },
-        stediPayerName: { type: 'string', description: 'Display name from Stedi' },
-      },
-      required: ['payerName', 'stediPayerId'],
-    },
-  },
-  {
     name: 'check_eligibility',
     description: 'Submit X12 270 eligibility check to Stedi. Returns detailed coverage information. IMPORTANT: You must provide provider name (either organizationName OR firstName+lastName) - get this from the NPI lookup result.',
     input_schema: {
       type: 'object',
       properties: {
-        stediPayerId: { type: 'string', description: 'Stedi payer ID (from search_payers or get_payer_mapping)' },
+        stediPayerId: { type: 'string', description: 'Stedi payer ID (from search_payers)' },
         memberId: { type: 'string', description: 'Insurance member ID' },
         patientFirstName: { type: 'string', description: 'Patient first name' },
         patientLastName: { type: 'string', description: 'Patient last name' },
@@ -133,11 +122,35 @@ const TOOLS: Anthropic.Tool[] = [
 /**
  * Run the eligibility agent using Anthropic SDK directly.
  * Yields events for streaming to the client.
+ * Persists agent run to database.
  */
 export async function* runEligibilityAgent(
-  input: AgentInput
+  input: AgentInput,
+  context?: AgentContext
 ): AsyncGenerator<AgentEvent> {
   const client = new Anthropic();
+  const startTime = Date.now();
+
+  // Create AgentRun record if we have context
+  let agentRunId: string | null = null;
+  if (context) {
+    try {
+      const agentRun = await prisma.agentRun.create({
+        data: {
+          tenantId: context.tenantId,
+          sessionId: context.sessionId,
+          patientFhirId: context.patientFhirId,
+          inputPayload: input as unknown as object,
+          status: 'running',
+        },
+      });
+      agentRunId = agentRun.id;
+      serviceLogger.info({ agentRunId, tenantId: context.tenantId }, 'Created AgentRun record');
+    } catch (err) {
+      // Don't fail the agent if we can't persist - just log
+      serviceLogger.error({ err }, 'Failed to create AgentRun record');
+    }
+  }
 
   // Build structured data context
   const dataContext = buildDataContext({
@@ -190,11 +203,55 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
   // Accumulate text output for parsing structured JSON at the end
   let accumulatedText = '';
 
+  // Overall timeout (10 minutes)
+  const MAX_DURATION_MS = 10 * 60 * 1000;
+
+  // Helper to update AgentRun on completion
+  async function updateAgentRun(
+    status: 'completed' | 'failed',
+    output?: AgentOutput,
+    errorMessage?: string
+  ) {
+    if (!agentRunId) return;
+
+    try {
+      await prisma.agentRun.update({
+        where: { id: agentRunId },
+        data: {
+          status,
+          eligibilityResult: output?.eligibility as unknown as object || undefined,
+          summary: output?.summary,
+          discrepancies: output?.discrepancies as unknown as object || undefined,
+          rawStediResponse: output?.rawResponse as unknown as object || undefined,
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          estimatedCost: (totalInputTokens * 3.0 + totalOutputTokens * 15.0) / 1_000_000,
+          completedAt: new Date(),
+          durationMs: Date.now() - startTime,
+          errorMessage,
+        },
+      });
+      serviceLogger.info({ agentRunId, status, durationMs: Date.now() - startTime }, 'Updated AgentRun record');
+    } catch (err) {
+      serviceLogger.error({ err, agentRunId }, 'Failed to update AgentRun record');
+    }
+  }
+
   try {
     let turnCount = 0;
     const maxTurns = AGENT_LIMITS.MAX_TURNS;
 
     while (turnCount < maxTurns) {
+      // Check timeout
+      if (Date.now() - startTime > MAX_DURATION_MS) {
+        await updateAgentRun('failed', undefined, 'Agent operation timed out after 10 minutes');
+        yield {
+          type: 'error',
+          message: 'Agent operation timed out after 10 minutes',
+        };
+        return;
+      }
+
       turnCount++;
 
       // Make API call
@@ -310,13 +367,22 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
             eligibility: parsed.eligibility,
             rawResponse: parsed.rawResponse,
           };
-          console.log('[AgentLoop] Parsed structured output from agent');
+          serviceLogger.debug({}, 'Parsed structured output from agent');
         }
-      } catch (e) {
+      } catch {
         // Agent didn't provide valid structured output - fall back to tool result
-        console.log('[AgentLoop] Could not parse structured output, using tool result');
+        serviceLogger.debug({}, 'Could not parse structured output, using tool result');
       }
     }
+
+    // Update AgentRun with final results
+    const finalOutput: AgentOutput = {
+      summary: agentOutput?.summary,
+      discrepancies: agentOutput?.discrepancies,
+      eligibility: agentOutput?.eligibility || eligibilityResult,
+      rawResponse: agentOutput?.rawResponse || eligibilityResult?.rawResponse,
+    };
+    await updateAgentRun('completed', finalOutput);
 
     // Emit completion
     const usage: AgentUsage = {
@@ -328,16 +394,18 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
 
     yield {
       type: 'complete',
-      eligibilityResult: agentOutput?.eligibility || eligibilityResult,
-      summary: agentOutput?.summary,
-      discrepancies: agentOutput?.discrepancies,
-      rawResponse: agentOutput?.rawResponse || eligibilityResult?.rawResponse,
+      eligibilityResult: finalOutput.eligibility,
+      summary: finalOutput.summary,
+      discrepancies: finalOutput.discrepancies,
+      rawResponse: finalOutput.rawResponse,
       usage,
     };
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred';
+    await updateAgentRun('failed', undefined, errorMessage);
     yield {
       type: 'error',
-      message: error instanceof Error ? error.message : 'An unexpected error occurred',
+      message: errorMessage,
     };
   }
 }

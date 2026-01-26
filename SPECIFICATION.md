@@ -787,3 +787,61 @@ interface AgentResponse {
 2. **Stedi payer list** - Should we query Stedi's payer list API for better mapping?
 3. **Multi-tenant** - Is this needed for MVP or single-practice deployment?
 4. **Offline mode** - Should app work if Stedi is down? (show last known eligibility)
+
+---
+
+## 16. Code Audit (January 2026)
+
+See `CODE_AUDIT.md` for full audit report.
+
+### 16.1 Summary
+
+| Category | Status | Critical Issues |
+|----------|--------|-----------------|
+| Test Coverage | **CRITICAL** | Zero automated tests |
+| Code Quality | **MEDIUM** | 25+ console.log statements |
+| Performance | **HIGH** | Blocking crypto, no caching |
+| Security/Privacy | **CRITICAL** | PHI logging, no rate limiting |
+| Logging/Monitoring | **CRITICAL** | No monitoring infrastructure |
+| Dependencies | **LOW** | 2 unused packages |
+
+### 16.2 Security Issues
+
+**CRITICAL - Must Fix Before Production:**
+
+| Issue | Risk | Location |
+|-------|------|----------|
+| PHI logged to stdout | HIPAA violation | `services/stedi.ts:212,227`, `services/agent/executor.ts:28` |
+| No authorization on agent endpoint | Unauthenticated access to PHI | `routes/agent.ts:90` |
+| No rate limiting | DoS, cost abuse | All endpoints |
+| AuditLog never populated | HIPAA compliance | `prisma/schema.prisma` (table unused) |
+| JWT ID token not verified | User impersonation | `routes/auth.ts:250-280` |
+
+### 16.3 Performance Issues
+
+| Issue | Impact | Fix |
+|-------|--------|-----|
+| `scryptSync` blocks event loop | Request latency under load | Move to worker thread |
+| Missing database indexes | Slow token lookups | Add `@@index([tenantId, patientId])` |
+| Payer mappings lost on restart | Re-discovery costs | Persist to PostgreSQL |
+| NPI lookups not cached | Repeated API calls | Add LRU cache |
+
+### 16.4 Test Coverage
+
+**Current:** 0% - No test framework configured
+
+**Required:**
+- Unit tests for encryption, NPI validation, Stedi parsing
+- Integration tests for agent loop, OAuth flow
+- E2E tests for eligibility check workflow
+
+### 16.5 Dependencies
+
+**Unused (remove):**
+- `pdfkit` (0.16.0) - Leftover code
+- `@types/pdfkit` (0.13.9)
+
+**Missing:**
+- Test framework (jest/vitest)
+- Rate limiting (`@fastify/rate-limit`)
+- Log aggregation (Grafana/DataDog integration)

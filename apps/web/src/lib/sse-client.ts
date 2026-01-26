@@ -28,6 +28,8 @@ export interface SSEClientOptions<T> {
   parseData?: (data: string) => T;
   /** AbortSignal for cancellation */
   signal?: AbortSignal;
+  /** Include credentials (cookies) in request. Default: 'include' */
+  credentials?: RequestCredentials;
 }
 
 /**
@@ -62,8 +64,8 @@ export async function parseSSEStream<T>(
       try {
         const parsed = parseData(data);
         onEvent(parsed);
-      } catch (e) {
-        console.error('[SSE] Failed to parse event data:', e);
+      } catch {
+        // Silently skip unparseable events
       }
     }
     // Reset for next event
@@ -167,7 +169,6 @@ export async function parseSSEStream<T>(
     if (error instanceof Error && error.name === 'AbortError') {
       return;
     }
-    console.error('[SSE] Stream parsing error:', error);
     onError?.(error instanceof Error ? error : new Error(String(error)));
   } finally {
     reader.releaseLock();
@@ -183,7 +184,7 @@ export async function fetchSSE<T>(
   body: unknown,
   options: SSEClientOptions<T>
 ): Promise<void> {
-  const { signal, onError, onClose } = options;
+  const { signal, onError, onClose, credentials = 'include' } = options;
 
   try {
     const response = await fetch(url, {
@@ -194,6 +195,7 @@ export async function fetchSSE<T>(
       },
       body: JSON.stringify(body),
       signal,
+      credentials,
     });
 
     // Handle HTTP errors
@@ -226,7 +228,6 @@ export async function fetchSSE<T>(
       onClose?.();
       return;
     }
-    console.error('[SSE] Error:', error);
     onError?.(error instanceof Error ? error : new Error(String(error)));
   }
 }

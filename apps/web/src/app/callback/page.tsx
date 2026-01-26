@@ -45,11 +45,13 @@ function CallbackContent() {
     hasProcessed.current = true;
 
     // Exchange code for token via backend
+    // Backend sets HTTP-only cookie with internal JWT - no sessionStorage needed
     async function exchangeToken() {
       try {
         const response = await fetch('/api/auth/callback', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include', // Include cookies in request/response
           body: JSON.stringify({ code, state }),
         });
 
@@ -59,22 +61,8 @@ function CallbackContent() {
           throw new Error(data.error?.message || 'Token exchange failed');
         }
 
-        // Store token data in sessionStorage for use by eligibility page
-        sessionStorage.setItem('smart_access_token', data.access_token);
-        sessionStorage.setItem('smart_fhir_base_url', data.fhirBaseUrl);
-        if (data.refresh_token) {
-          sessionStorage.setItem('smart_refresh_token', data.refresh_token);
-        }
-        // Store id_token for user identification (contains fhirUser claim)
-        if (data.id_token) {
-          sessionStorage.setItem('smart_id_token', data.id_token);
-        }
-        // Store fhirUser if provided directly
-        if (data.fhirUser) {
-          sessionStorage.setItem('smart_fhir_user', data.fhirUser);
-        }
-
-        // Redirect to eligibility page with patient context
+        // Cookie is set by backend - no sessionStorage needed
+        // Just redirect to eligibility page with patient context
         const patientId = data.patient || searchParams.get('patient');
         router.push(`/eligibility${patientId ? `?patient=${patientId}` : ''}`);
       } catch (err) {

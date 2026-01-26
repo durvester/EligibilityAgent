@@ -43,8 +43,8 @@ export default function InsuranceForm({ insurance, onChange, disabled }: Insuran
           groupNumber: data.data.groupNumber || insurance?.groupNumber,
         });
       }
-    } catch (err) {
-      console.error('Card parse error:', err);
+    } catch {
+      // Silently fail - user can manually enter insurance details
     } finally {
       setIsUploading(false);
     }

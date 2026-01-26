@@ -3,13 +3,15 @@
  *
  * Executes tool calls by invoking the appropriate service functions.
  * Each tool returns a result that gets passed back to Claude.
+ *
+ * Note: Payer mapping tools removed - agent uses search_payers and its knowledge.
  */
 
 import { lookupNpi, searchNpi } from '../npi.js';
 import { searchPayers } from '../payer-search.js';
-import { getPayerMapping, savePayerMapping } from '../payer-mapping.js';
 import { checkEligibilityWithStedi } from '../stedi.js';
 import { discoverInsurance } from '../insurance-discovery.js';
+import { serviceLogger } from '../../lib/logger.js';
 import type { ToolName } from './tools.js';
 
 export interface ToolResult {
@@ -25,7 +27,7 @@ export async function executeTool(
   toolName: string,
   input: Record<string, unknown>
 ): Promise<ToolResult> {
-  console.log(`[ToolExecutor] Executing tool: ${toolName}`, JSON.stringify(input, null, 2));
+  serviceLogger.info({ toolName, inputKeys: Object.keys(input) }, 'Executing tool');
 
   try {
     switch (toolName as ToolName) {
@@ -37,12 +39,6 @@ export async function executeTool(
 
       case 'search_payers':
         return await executeSearchPayers(input);
-
-      case 'get_payer_mapping':
-        return await executeGetPayerMapping(input);
-
-      case 'save_payer_mapping':
-        return await executeSavePayerMapping(input);
 
       case 'check_eligibility':
         return await executeCheckEligibility(input);
@@ -57,7 +53,7 @@ export async function executeTool(
         };
     }
   } catch (error) {
-    console.error(`[ToolExecutor] Tool ${toolName} failed:`, error);
+    serviceLogger.error({ toolName, error: error instanceof Error ? error.message : 'Unknown' }, 'Tool execution failed');
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -161,59 +157,6 @@ async function executeSearchPayers(input: Record<string, unknown>): Promise<Tool
         eligibilitySupported: p.eligibilitySupported,
       })),
       total: result.total,
-    },
-  };
-}
-
-async function executeGetPayerMapping(input: Record<string, unknown>): Promise<ToolResult> {
-  const payerName = input.payerName as string;
-  if (!payerName) {
-    return { success: false, error: 'Payer name is required' };
-  }
-
-  const mapping = await getPayerMapping(payerName);
-
-  if (!mapping) {
-    return {
-      success: true,
-      data: {
-        found: false,
-        message: `No mapping found for "${payerName}"`,
-      },
-    };
-  }
-
-  return {
-    success: true,
-    data: {
-      found: true,
-      stediPayerId: mapping.stediPayerId,
-      stediPayerName: mapping.stediPayerName,
-      usageCount: mapping.usageCount,
-    },
-  };
-}
-
-async function executeSavePayerMapping(input: Record<string, unknown>): Promise<ToolResult> {
-  const payerName = input.payerName as string;
-  const stediPayerId = input.stediPayerId as string;
-  const stediPayerName = input.stediPayerName as string | undefined;
-
-  if (!payerName || !stediPayerId) {
-    return { success: false, error: 'Payer name and Stedi payer ID are required' };
-  }
-
-  const mapping = await savePayerMapping(payerName, stediPayerId, stediPayerName);
-
-  return {
-    success: true,
-    data: {
-      saved: true,
-      mapping: {
-        payerName: mapping.payerName,
-        stediPayerId: mapping.stediPayerId,
-        stediPayerName: mapping.stediPayerName,
-      },
     },
   };
 }

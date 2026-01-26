@@ -1,27 +1,49 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { serviceLogger } from './logger.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
 const SALT_LENGTH = 32;
 
+// Cached base encryption key (derived once, reused)
+let cachedBaseKey: Buffer | null = null;
+let cachedKeySource: string | null = null;
+
 /**
- * Get encryption key from environment or generate a warning
+ * Get encryption key from environment.
+ * Caches the derived key to avoid repeated scrypt calls.
+ * In production, throws if not set. In development, uses fallback.
  */
 function getEncryptionKey(): Buffer {
   const key = process.env.ENCRYPTION_KEY;
+  const keySource = key || 'dev-fallback';
 
-  if (!key) {
-    console.warn(
-      '[SECURITY WARNING] ENCRYPTION_KEY not set. Using fallback key for development only. ' +
-      'Generate a secure key with: openssl rand -base64 32'
-    );
-    // Fallback for development - DO NOT use in production
-    return scryptSync('dev-fallback-key-not-for-production', 'salt', 32);
+  // Return cached key if source hasn't changed
+  if (cachedBaseKey && cachedKeySource === keySource) {
+    return cachedBaseKey;
   }
 
-  // Derive a 32-byte key from the provided key
-  return scryptSync(key, 'eligibility-agent-salt', 32);
+  if (!key) {
+    // In production, require a proper key
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'ENCRYPTION_KEY is required in production. ' +
+        'Generate with: openssl rand -base64 32'
+      );
+    }
+
+    // Development fallback only
+    serviceLogger.warn({}, 'ENCRYPTION_KEY not set - using development fallback');
+    cachedBaseKey = scryptSync('dev-fallback-key-not-for-production', 'salt', 32);
+    cachedKeySource = keySource;
+    return cachedBaseKey;
+  }
+
+  // Derive and cache the key
+  cachedBaseKey = scryptSync(key, 'eligibility-agent-salt', 32);
+  cachedKeySource = keySource;
+  return cachedBaseKey;
 }
 
 /**

@@ -20,22 +20,16 @@ export default function ProviderInfo({ provider, onChange, disabled }: ProviderI
   const listRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
-  // Fetch practitioners with pagination
+  // Fetch practitioners with pagination (using cookie-based auth)
   const fetchPractitioners = useCallback(async (currentOffset: number, append = false) => {
     if (isLoading) return;
 
     setIsLoading(true);
     try {
-      const accessToken = sessionStorage.getItem('smart_access_token');
-      const fhirBaseUrl = sessionStorage.getItem('smart_fhir_base_url');
-
       const response = await fetch(
         `/api/fhir/practitioners?_count=20&_offset=${currentOffset}`,
         {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'X-FHIR-Base-URL': fhirBaseUrl || '',
-          },
+          credentials: 'include',
         }
       );
 
@@ -46,8 +40,8 @@ export default function ProviderInfo({ provider, onChange, disabled }: ProviderI
         setHasMore(data.pagination?.hasMore ?? newPractitioners.length === 20);
         setOffset(currentOffset + newPractitioners.length);
       }
-    } catch (err) {
-      console.error('Failed to fetch practitioners:', err);
+    } catch {
+      // Silently fail - provider selection is optional
     } finally {
       setIsLoading(false);
     }

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type { EligibilityResponse } from '@eligibility-agent/shared';
+import { serviceLogger } from '../lib/logger.js';
 
 const STEDI_API_URL = process.env.STEDI_API_URL || 'https://healthcare.us.stedi.com/2024-04-01';
 
@@ -209,7 +210,11 @@ export async function checkEligibilityWithStedi(params: EligibilityParams): Prom
     },
   };
 
-  console.log('[Stedi] Submitting eligibility request:', JSON.stringify(request, null, 2));
+  serviceLogger.info({
+    payerId: request.tradingPartnerServiceId,
+    providerNpi: request.provider.npi,
+    serviceTypes: request.encounter.serviceTypeCodes,
+  }, 'Submitting Stedi eligibility request');
 
   try {
     const response = await axios.post(
@@ -224,15 +229,23 @@ export async function checkEligibilityWithStedi(params: EligibilityParams): Prom
       }
     );
 
-    console.log('[Stedi] Response received:', JSON.stringify(response.data, null, 2));
+    serviceLogger.info({
+      status: response.status,
+      hasData: !!response.data,
+    }, 'Stedi eligibility response received');
 
     return parseStediResponse(response.data);
   } catch (error) {
-    console.error('[Stedi] Request failed:', error);
+    serviceLogger.error({
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }, 'Stedi request failed');
 
     if (axios.isAxiosError(error) && error.response) {
       const errorData = error.response.data;
-      console.error('[Stedi] Error response:', JSON.stringify(errorData, null, 2));
+      serviceLogger.error({
+        status: error.response.status,
+        message: errorData?.message || errorData?.error,
+      }, 'Stedi API error response');
 
       return {
         status: 'unknown',

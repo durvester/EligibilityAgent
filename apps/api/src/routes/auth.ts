@@ -1,7 +1,26 @@
+/**
+ * Auth Routes
+ *
+ * Handles SMART on FHIR OAuth flow with tenant-centric architecture.
+ *
+ * Flow:
+ * 1. /launch - Receive ISS and launch token from EHR, redirect to authorization
+ * 2. /callback - Exchange code for tokens, create tenant/session, set cookie
+ * 3. /me - Get current user info from session
+ * 4. /logout - Revoke session, clear cookie
+ * 5. /refresh - Refresh internal JWT (extend session)
+ */
+
 import { FastifyPluginAsync } from 'fastify';
 import { v4 as uuid } from 'uuid';
 import axios from 'axios';
-import * as tokenService from '../services/token-service.js';
+import { prisma } from '@eligibility-agent/db';
+import { createSession, revokeSession, refreshSession, verifyAndGetSession } from '../services/session-service.js';
+import { getSessionCookieOptions } from '../lib/jwt.js';
+import { cacheGet, cacheSet, CacheKeys, CacheTTL } from '../lib/redis.js';
+import { auditLogin, auditLogout } from '../services/audit-service.js';
+import { getRequiredEnv } from '../lib/validate-env.js';
+import { sessionMiddleware } from '../middleware/session.js';
 
 interface LaunchQuery {
   iss: string;
@@ -29,26 +48,22 @@ interface LaunchState {
   createdAt: number;
 }
 
-// In-memory state store (use Redis/DB in production)
+// In-memory state store (use Redis in production for multi-instance)
 const stateStore = new Map<string, LaunchState>();
 
-// Cache for SMART configurations (avoid repeated discovery calls)
-const smartConfigCache = new Map<string, { config: SmartConfiguration; expiresAt: number }>();
-
 /**
- * Discover SMART configuration from FHIR server
- * Follows SMART on FHIR spec: try .well-known/smart-configuration first,
- * then fall back to metadata endpoint
+ * Discover SMART configuration from FHIR server.
+ * Caches results in Redis.
  */
 async function discoverSmartConfiguration(iss: string): Promise<SmartConfiguration> {
-  // Check cache first
-  const cached = smartConfigCache.get(iss);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.config;
-  }
-
   // Normalize ISS (remove trailing slash)
   const baseUrl = iss.replace(/\/$/, '');
+
+  // Check Redis cache first
+  const cached = await cacheGet<SmartConfiguration>(CacheKeys.smartConfig(baseUrl));
+  if (cached) {
+    return cached;
+  }
 
   // Try .well-known/smart-configuration first (preferred)
   try {
@@ -59,16 +74,10 @@ async function discoverSmartConfiguration(iss: string): Promise<SmartConfigurati
     });
 
     const config = response.data;
-
-    // Cache for 1 hour
-    smartConfigCache.set(iss, {
-      config,
-      expiresAt: Date.now() + 60 * 60 * 1000,
-    });
-
+    await cacheSet(CacheKeys.smartConfig(baseUrl), config, CacheTTL.SMART_CONFIG);
     return config;
-  } catch (wellKnownError) {
-    console.log(`[SMART] .well-known/smart-configuration not found for ${iss}, trying metadata`);
+  } catch {
+    // .well-known not found, try metadata endpoint
   }
 
   // Fall back to FHIR metadata endpoint
@@ -80,19 +89,22 @@ async function discoverSmartConfiguration(iss: string): Promise<SmartConfigurati
     });
 
     const metadata = response.data;
-
-    // Extract OAuth endpoints from CapabilityStatement
     const security = metadata.rest?.[0]?.security;
     const oauthExtension = security?.extension?.find(
-      (ext: any) => ext.url === 'http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris'
+      (ext: { url: string }) =>
+        ext.url === 'http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris'
     );
 
     if (!oauthExtension) {
       throw new Error('No OAuth configuration found in FHIR metadata');
     }
 
-    const authorizeUrl = oauthExtension.extension?.find((e: any) => e.url === 'authorize')?.valueUri;
-    const tokenUrl = oauthExtension.extension?.find((e: any) => e.url === 'token')?.valueUri;
+    const authorizeUrl = oauthExtension.extension?.find(
+      (e: { url: string }) => e.url === 'authorize'
+    )?.valueUri;
+    const tokenUrl = oauthExtension.extension?.find(
+      (e: { url: string }) => e.url === 'token'
+    )?.valueUri;
 
     if (!authorizeUrl || !tokenUrl) {
       throw new Error('Missing authorize or token URL in FHIR metadata');
@@ -103,16 +115,117 @@ async function discoverSmartConfiguration(iss: string): Promise<SmartConfigurati
       token_endpoint: tokenUrl,
     };
 
-    // Cache for 1 hour
-    smartConfigCache.set(iss, {
-      config,
-      expiresAt: Date.now() + 60 * 60 * 1000,
-    });
-
+    await cacheSet(CacheKeys.smartConfig(baseUrl), config, CacheTTL.SMART_CONFIG);
     return config;
-  } catch (metadataError) {
+  } catch {
     throw new Error(`Failed to discover SMART configuration for ${iss}`);
   }
+}
+
+/**
+ * Get or create tenant from issuer (FHIR base URL).
+ * Issuer IS the tenant identifier.
+ */
+async function getOrCreateTenant(
+  issuer: string,
+  accessToken?: string
+): Promise<{ id: string; name: string | null }> {
+  // Look up existing tenant
+  let tenant = await prisma.tenant.findUnique({
+    where: { issuer },
+    select: { id: true, name: true },
+  });
+
+  if (tenant) {
+    return tenant;
+  }
+
+  // Create new tenant
+  // Try to fetch organization name from FHIR server
+  let organizationName: string | null = null;
+  let organizationJson: object | null = null;
+
+  if (accessToken) {
+    try {
+      const orgResponse = await axios.get(`${issuer}/Organization`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/fhir+json',
+        },
+        timeout: 10000,
+      });
+
+      const orgs = orgResponse.data.entry;
+      if (orgs && orgs.length > 0) {
+        organizationName = orgs[0].resource?.name;
+        organizationJson = orgs[0].resource;
+      }
+    } catch {
+      // Organization fetch is best-effort, don't fail tenant creation
+    }
+  }
+
+  tenant = await prisma.tenant.create({
+    data: {
+      issuer,
+      name: organizationName,
+      organizationJson: organizationJson as object,
+    },
+    select: { id: true, name: true },
+  });
+
+  return tenant;
+}
+
+/**
+ * Extract fhirUser from id_token.
+ */
+function extractFhirUser(idToken: string): {
+  fhirUser: string | undefined;
+  userName: string | undefined;
+} {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length < 2) {
+      return { fhirUser: undefined, userName: undefined };
+    }
+
+    // Decode payload (second part)
+    let payloadStr: string;
+    try {
+      payloadStr = Buffer.from(parts[1], 'base64url').toString('utf8');
+    } catch {
+      // Fallback to regular base64 with URL-safe character replacement
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      payloadStr = Buffer.from(base64, 'base64').toString('utf8');
+    }
+    const payload = JSON.parse(payloadStr);
+
+    // Try different claim names for fhirUser
+    const fhirUser =
+      payload.fhirUser ||
+      payload.fhir_user ||
+      payload.profile ||
+      payload.sub;
+
+    // Try to extract user name
+    const userName = payload.name || payload.preferred_username;
+
+    return { fhirUser, userName };
+  } catch {
+    return { fhirUser: undefined, userName: undefined };
+  }
+}
+
+/**
+ * Extract practitioner ID from fhirUser URL.
+ * E.g., "https://fhir.server.com/Practitioner/123" -> "Practitioner/123"
+ */
+function extractPractitionerReference(fhirUser: string | undefined): string | null {
+  if (!fhirUser) return null;
+
+  const match = fhirUser.match(/(Practitioner\/[^/]+)$/);
+  return match ? match[1] : null;
 }
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
@@ -120,7 +233,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
    * SMART on FHIR Launch
    *
    * 1. Receive iss (FHIR base URL) and launch token from EHR
-   * 2. Discover OAuth endpoints from iss via .well-known or metadata
+   * 2. Discover OAuth endpoints from iss
    * 3. Redirect to authorization endpoint
    */
   fastify.get<{ Querystring: LaunchQuery }>('/launch', async (request, reply) => {
@@ -136,13 +249,13 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     fastify.log.info({ iss, launch }, 'SMART launch initiated');
 
     try {
-      // Discover SMART configuration from the FHIR server
+      // Discover SMART configuration
       const smartConfig = await discoverSmartConfiguration(iss);
 
       fastify.log.info({
         iss,
         authorizeUrl: smartConfig.authorization_endpoint,
-        tokenUrl: smartConfig.token_endpoint
+        tokenUrl: smartConfig.token_endpoint,
       }, 'SMART configuration discovered');
 
       // Generate state for CSRF protection
@@ -163,19 +276,18 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      // Build authorization URL
-      const redirectUri = process.env.NEXT_PUBLIC_APP_URL
-        ? `${process.env.NEXT_PUBLIC_APP_URL}/callback`
-        : 'http://localhost:3000/callback';
+      // Build authorization URL - NO FALLBACK for required env vars
+      const appUrl = getRequiredEnv('NEXT_PUBLIC_APP_URL');
+      const redirectUri = `${appUrl}/callback`;
 
       const authorizeUrl = new URL(smartConfig.authorization_endpoint);
       authorizeUrl.searchParams.set('response_type', 'code');
-      authorizeUrl.searchParams.set('client_id', process.env.PF_CLIENT_ID || '');
+      authorizeUrl.searchParams.set('client_id', getRequiredEnv('PF_CLIENT_ID'));
       authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-      authorizeUrl.searchParams.set('scope', process.env.PF_SCOPES || 'launch/patient openid fhirUser patient/Patient.read patient/Coverage.read');
+      authorizeUrl.searchParams.set('scope', getRequiredEnv('PF_SCOPES'));
       authorizeUrl.searchParams.set('state', state);
       authorizeUrl.searchParams.set('launch', launch);
-      authorizeUrl.searchParams.set('aud', iss); // The FHIR server URL
+      authorizeUrl.searchParams.set('aud', iss);
 
       fastify.log.info({ authorizeUrl: authorizeUrl.toString() }, 'Redirecting to authorization');
 
@@ -195,7 +307,12 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
   /**
    * OAuth Callback
-   * Exchange authorization code for access token
+   *
+   * 1. Exchange authorization code for tokens
+   * 2. Create or get tenant from issuer
+   * 3. Create session with PF tokens
+   * 4. Set HTTP-only session cookie
+   * 5. Return tenant/user info (NOT tokens)
    */
   fastify.post<{ Body: CallbackBody }>('/callback', async (request, reply) => {
     const { code, state } = request.body;
@@ -217,20 +334,19 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     }
     stateStore.delete(state);
 
-    const redirectUri = process.env.NEXT_PUBLIC_APP_URL
-      ? `${process.env.NEXT_PUBLIC_APP_URL}/callback`
-      : 'http://localhost:3000/callback';
+    const appUrl = getRequiredEnv('NEXT_PUBLIC_APP_URL');
+    const redirectUri = `${appUrl}/callback`;
 
     try {
-      // Exchange code for token using discovered token endpoint
+      // Exchange code for token
       const tokenResponse = await axios.post(
         launchState.tokenUrl,
         new URLSearchParams({
           grant_type: 'authorization_code',
           code,
           redirect_uri: redirectUri,
-          client_id: process.env.PF_CLIENT_ID || '',
-          client_secret: process.env.PF_CLIENT_SECRET || '',
+          client_id: getRequiredEnv('PF_CLIENT_ID'),
+          client_secret: getRequiredEnv('PF_CLIENT_SECRET'),
         }),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -240,44 +356,12 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
       const tokenData = tokenResponse.data;
 
-      // Decode id_token to extract fhirUser claim if present
-      // The fhirUser claim contains the FHIR resource reference of the logged-in user
-      // e.g., "Practitioner/abc123" or "https://fhir.server.com/Practitioner/abc123"
-      let fhirUser: string | undefined = tokenData.fhirUser;
-      if (!fhirUser && tokenData.id_token) {
-        try {
-          // JWT is base64url encoded: header.payload.signature
-          const parts = tokenData.id_token.split('.');
-          if (parts.length >= 2) {
-            // Decode payload (second part) - handle both base64url and regular base64
-            let payloadStr: string;
-            try {
-              payloadStr = Buffer.from(parts[1], 'base64url').toString('utf8');
-            } catch {
-              // Fallback to regular base64 with URL-safe character replacement
-              const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-              payloadStr = Buffer.from(base64, 'base64').toString('utf8');
-            }
-            const payload = JSON.parse(payloadStr);
+      // Extract fhirUser from id_token
+      const { fhirUser, userName } = tokenData.id_token
+        ? extractFhirUser(tokenData.id_token)
+        : { fhirUser: tokenData.fhirUser, userName: undefined };
 
-            // Try different claim names (SMART spec uses fhirUser, but some servers vary)
-            fhirUser = payload.fhirUser
-              || payload['fhirUser']
-              || payload.fhir_user
-              || payload.profile  // Some OIDC providers use 'profile' for the user reference
-              || payload.sub;  // 'sub' might contain the practitioner reference
-
-            fastify.log.info({
-              fhirUser,
-              payloadKeys: Object.keys(payload),
-              sub: payload.sub,
-              profile: payload.profile,
-            }, 'Decoded id_token payload');
-          }
-        } catch (decodeErr) {
-          fastify.log.warn({ error: decodeErr }, 'Failed to decode id_token');
-        }
-      }
+      const userFhirId = extractPractitionerReference(fhirUser);
 
       fastify.log.info({
         hasAccessToken: !!tokenData.access_token,
@@ -285,45 +369,62 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         hasIdToken: !!tokenData.id_token,
         patient: tokenData.patient,
         fhirUser,
+        userFhirId,
         expiresIn: tokenData.expires_in,
       }, 'Token exchange successful');
 
-      // Store token in database (encrypted) if DATABASE_URL is configured
-      let tokenId: string | null = null;
-      if (process.env.DATABASE_URL) {
-        try {
-          // Default tenant ID for now - in production, derive from iss or client config
-          const tenantId = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+      // Get or create tenant from issuer
+      const tenant = await getOrCreateTenant(launchState.iss, tokenData.access_token);
 
-          tokenId = await tokenService.storeToken(
-            tenantId,
-            null, // userFhirId - not available at this point
-            tokenData.access_token,
-            tokenData.refresh_token || null,
-            tokenData.expires_in || 3600,
-            tokenData.patient || null,
-            tokenData.scope || null
-          );
+      // Create session
+      const { sessionId, internalJwt, expiresAt } = await createSession({
+        tenantId: tenant.id,
+        userFhirId,
+        userName: userName || null,
+        patientId: tokenData.patient || null,
+        scope: tokenData.scope || null,
+        pfAccessToken: tokenData.access_token,
+        pfRefreshToken: tokenData.refresh_token || null,
+        pfExpiresIn: tokenData.expires_in || 3600,
+      });
 
-          fastify.log.info({ tokenId }, 'Token stored in database');
-        } catch (dbError) {
-          // Log but don't fail - allow session-based flow as fallback
-          fastify.log.warn({ error: dbError }, 'Failed to store token in database, using session fallback');
-        }
-      }
+      // Audit the login
+      auditLogin(
+        tenant.id,
+        sessionId,
+        userFhirId,
+        userName || null,
+        request.ip,
+        request.headers['user-agent']
+      );
 
+      // Set session cookie
+      const cookieOptions = getSessionCookieOptions();
+      reply.setCookie(cookieOptions.name, internalJwt, {
+        httpOnly: cookieOptions.httpOnly,
+        secure: cookieOptions.secure,
+        sameSite: cookieOptions.sameSite,
+        path: cookieOptions.path,
+        domain: cookieOptions.domain,
+        maxAge: cookieOptions.maxAge,
+      });
+
+      fastify.log.info({
+        sessionId,
+        tenantId: tenant.id,
+        userFhirId,
+      }, 'Session created');
+
+      // Return tenant/user info - NOT tokens
       return {
         success: true,
-        access_token: tokenData.access_token,
-        token_type: tokenData.token_type || 'Bearer',
-        expires_in: tokenData.expires_in,
-        scope: tokenData.scope,
-        patient: tokenData.patient, // Patient ID from launch context
-        fhirBaseUrl: launchState.iss, // Return the FHIR base URL for subsequent calls
-        refresh_token: tokenData.refresh_token,
-        id_token: tokenData.id_token, // Contains fhirUser claim for logged-in user
-        fhirUser, // Practitioner reference extracted from id_token (e.g., "Practitioner/123")
-        tokenId, // Return tokenId for future database lookups
+        tenantId: tenant.id,
+        tenantName: tenant.name,
+        userName,
+        userFhirId,
+        patientId: tokenData.patient,
+        fhirBaseUrl: launchState.iss,
+        expiresAt: expiresAt.toISOString(),
       };
     } catch (error) {
       fastify.log.error(error, 'Token exchange failed');
@@ -333,7 +434,10 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           success: false,
           error: {
             code: 'TOKEN_EXCHANGE_FAILED',
-            message: error.response.data?.error_description || error.response.data?.error || 'Token exchange failed',
+            message:
+              error.response.data?.error_description ||
+              error.response.data?.error ||
+              'Token exchange failed',
           },
         });
       }
@@ -346,51 +450,103 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * Token refresh endpoint
+   * Get current user info from session.
+   *
+   * Uses session middleware to validate JWT from cookie.
    */
-  fastify.post<{ Body: { refresh_token: string; fhir_base_url: string } }>('/refresh', async (request, reply) => {
-    const { refresh_token, fhir_base_url } = request.body;
-
-    if (!refresh_token || !fhir_base_url) {
-      return reply.status(400).send({
+  fastify.get('/me', {
+    preHandler: sessionMiddleware,
+  }, async (request, reply) => {
+    if (!request.session) {
+      return reply.status(401).send({
         success: false,
-        error: { code: 'INVALID_REQUEST', message: 'Missing refresh_token or fhir_base_url' },
+        error: { code: 'UNAUTHORIZED', message: 'Not authenticated' },
       });
     }
 
-    try {
-      // Discover token endpoint from the FHIR server
-      const smartConfig = await discoverSmartConfiguration(fhir_base_url);
+    // Get tenant info
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: request.session.tenantId },
+      select: { id: true, name: true, issuer: true },
+    });
 
-      const tokenResponse = await axios.post(
-        smartConfig.token_endpoint,
-        new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token,
-          client_id: process.env.PF_CLIENT_ID || '',
-          client_secret: process.env.PF_CLIENT_SECRET || '',
-        }),
-        {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          timeout: 30000,
-        }
-      );
+    return {
+      success: true,
+      session: {
+        id: request.session.id,
+        tenantId: request.session.tenantId,
+        tenantName: tenant?.name || null,
+        fhirBaseUrl: tenant?.issuer || null,
+        userFhirId: request.session.userFhirId,
+        userName: request.session.userName,
+        patientId: request.session.patientId,
+      },
+    };
+  });
 
-      return {
-        success: true,
-        access_token: tokenResponse.data.access_token,
-        token_type: tokenResponse.data.token_type || 'Bearer',
-        expires_in: tokenResponse.data.expires_in,
-        refresh_token: tokenResponse.data.refresh_token,
-      };
-    } catch (error) {
-      fastify.log.error(error, 'Token refresh failed');
+  /**
+   * Logout - revoke session and clear cookie.
+   */
+  fastify.post('/logout', {
+    preHandler: sessionMiddleware,
+  }, async (request, reply) => {
+    if (request.session) {
+      // Audit the logout
+      auditLogout(request);
 
-      return reply.status(500).send({
+      // Revoke session
+      await revokeSession(request.session.id);
+    }
+
+    // Clear cookie
+    const cookieOptions = getSessionCookieOptions();
+    reply.clearCookie(cookieOptions.name, {
+      path: cookieOptions.path,
+      domain: cookieOptions.domain,
+    });
+
+    return { success: true };
+  });
+
+  /**
+   * Refresh internal JWT (extend session).
+   *
+   * Called by frontend when JWT is close to expiration.
+   */
+  fastify.post('/refresh', {
+    preHandler: sessionMiddleware,
+  }, async (request, reply) => {
+    if (!request.session) {
+      return reply.status(401).send({
         success: false,
-        error: { code: 'REFRESH_FAILED', message: 'Token refresh failed' },
+        error: { code: 'UNAUTHORIZED', message: 'Not authenticated' },
       });
     }
+
+    const result = await refreshSession(request.session.id);
+
+    if (!result) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'SESSION_EXPIRED', message: 'Session has expired' },
+      });
+    }
+
+    // Set new cookie
+    const cookieOptions = getSessionCookieOptions();
+    reply.setCookie(cookieOptions.name, result.internalJwt, {
+      httpOnly: cookieOptions.httpOnly,
+      secure: cookieOptions.secure,
+      sameSite: cookieOptions.sameSite,
+      path: cookieOptions.path,
+      domain: cookieOptions.domain,
+      maxAge: cookieOptions.maxAge,
+    });
+
+    return {
+      success: true,
+      expiresAt: result.expiresAt.toISOString(),
+    };
   });
 };
 
