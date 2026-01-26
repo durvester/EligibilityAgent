@@ -89,9 +89,8 @@ export function validateEnvironment(): EnvValidationResult {
     errors.push('NEXT_PUBLIC_APP_URL is required for OAuth redirects');
   }
 
-  if (!process.env.NEXT_PUBLIC_API_URL) {
-    errors.push('NEXT_PUBLIC_API_URL is required for SSE streaming');
-  }
+  // Note: NEXT_PUBLIC_API_URL is a frontend-only variable for SSE streaming
+  // It's not needed by the API itself
 
   return {
     valid: errors.length === 0,
