@@ -73,7 +73,7 @@ export function audit(entry: AuditEntry): void {
     .then(() => {
       serviceLogger.debug({ action: entry.action, tenantId: entry.tenantId }, 'Audit log written');
     })
-    .catch((err) => {
+    .catch((err: unknown) => {
       // Fallback: log to stdout (for log aggregation systems)
       serviceLogger.error(
         {

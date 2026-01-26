@@ -159,7 +159,7 @@ export async function getSessionByJwtId(jwtId: string): Promise<SessionInfo | nu
   prisma.session.update({
     where: { id: session.id },
     data: { lastAccessedAt: new Date() },
-  }).catch(err => {
+  }).catch((err: unknown) => {
     serviceLogger.warn({ err, sessionId: session.id }, 'Failed to update lastAccessedAt');
   });
 
