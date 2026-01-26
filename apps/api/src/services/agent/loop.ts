@@ -1,11 +1,10 @@
 /**
  * Agent Loop for the Eligibility Agent
  *
- * Uses Claude Agent SDK with custom MCP tools for eligibility verification.
+ * Uses Anthropic SDK directly with tool use for eligibility verification.
  */
 
-import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod';
+import Anthropic from '@anthropic-ai/sdk';
 import type {
   AgentInput,
   AgentEvent,
@@ -13,6 +12,9 @@ import type {
   EligibilityResponse,
   DiscrepancyReport,
 } from '@eligibility-agent/shared';
+
+import { ELIGIBILITY_SYSTEM_PROMPT, buildDataContext, AGENT_LIMITS } from './prompt.js';
+import { executeTool } from './executor.js';
 
 /**
  * Parsed agent output structure
@@ -23,168 +25,120 @@ interface AgentOutput {
   eligibility?: EligibilityResponse;
   rawResponse?: unknown;
 }
-import { ELIGIBILITY_SYSTEM_PROMPT, buildDataContext, AGENT_LIMITS } from './prompt.js';
-import { executeTool } from './executor.js';
+
+// Tool definitions for Anthropic API
+const TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'lookup_npi',
+    description: 'Validate NPI format and lookup provider details from NPPES registry. Use this when you have an NPI and want to verify it or get provider details.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        npi: { type: 'string', description: '10-digit NPI number to lookup' },
+      },
+      required: ['npi'],
+    },
+  },
+  {
+    name: 'search_npi',
+    description: 'Search NPPES registry for providers by name. Use this when you need to find an NPI for a provider.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        firstName: { type: 'string', description: 'Provider first name' },
+        lastName: { type: 'string', description: 'Provider last name' },
+        state: { type: 'string', description: '2-letter state code to narrow search' },
+      },
+      required: ['firstName', 'lastName'],
+    },
+  },
+  {
+    name: 'search_payers',
+    description: 'Search Stedi payer directory by name. Returns payer IDs needed for eligibility checks.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Payer name to search (fuzzy match supported)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_payer_mapping',
+    description: 'Check if we have a known Stedi payer ID mapping for this payer name. Check this before searching.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        payerName: { type: 'string', description: 'Payer name to lookup' },
+      },
+      required: ['payerName'],
+    },
+  },
+  {
+    name: 'save_payer_mapping',
+    description: 'Save a successful payer name to Stedi ID mapping for future use.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        payerName: { type: 'string', description: 'Original payer name from FHIR/user' },
+        stediPayerId: { type: 'string', description: 'Stedi payer ID that worked' },
+        stediPayerName: { type: 'string', description: 'Display name from Stedi' },
+      },
+      required: ['payerName', 'stediPayerId'],
+    },
+  },
+  {
+    name: 'check_eligibility',
+    description: 'Submit X12 270 eligibility check to Stedi. Returns detailed coverage information. IMPORTANT: You must provide provider name (either organizationName OR firstName+lastName) - get this from the NPI lookup result.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        stediPayerId: { type: 'string', description: 'Stedi payer ID (from search_payers or get_payer_mapping)' },
+        memberId: { type: 'string', description: 'Insurance member ID' },
+        patientFirstName: { type: 'string', description: 'Patient first name' },
+        patientLastName: { type: 'string', description: 'Patient last name' },
+        patientDob: { type: 'string', description: 'Patient date of birth (YYYY-MM-DD)' },
+        providerNpi: { type: 'string', description: '10-digit provider NPI' },
+        providerFirstName: { type: 'string', description: 'Provider first name (required if no organizationName)' },
+        providerLastName: { type: 'string', description: 'Provider last name (required if no organizationName)' },
+        providerOrganizationName: { type: 'string', description: 'Provider organization name (required if no firstName/lastName)' },
+        serviceTypeCode: { type: 'string', description: 'Service type code (default: 30 for Health Benefit Plan Coverage)' },
+        groupNumber: { type: 'string', description: 'Insurance group number if known' },
+      },
+      required: ['stediPayerId', 'memberId', 'patientFirstName', 'patientLastName', 'patientDob', 'providerNpi'],
+    },
+  },
+  {
+    name: 'discover_insurance',
+    description: 'Find patient insurance coverage when payer is unknown. Slower (up to 120s). Use as last resort when you have no payer information. Requires provider NPI.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        firstName: { type: 'string', description: 'Patient first name' },
+        lastName: { type: 'string', description: 'Patient last name' },
+        dateOfBirth: { type: 'string', description: 'Patient date of birth (YYYY-MM-DD)' },
+        providerNpi: { type: 'string', description: '10-digit provider NPI (required for discovery)' },
+        street: { type: 'string', description: 'Street address (improves accuracy)' },
+        city: { type: 'string', description: 'City' },
+        state: { type: 'string', description: '2-letter state code' },
+        zipCode: { type: 'string', description: 'ZIP code (improves accuracy)' },
+        ssn: { type: 'string', description: 'Last 4 digits of SSN (improves accuracy)' },
+        gender: { type: 'string', enum: ['M', 'F'], description: 'Patient gender (M or F)' },
+      },
+      required: ['firstName', 'lastName', 'dateOfBirth', 'providerNpi'],
+    },
+  },
+];
 
 /**
- * Create MCP server with eligibility tools
- */
-function createEligibilityTools() {
-  return createSdkMcpServer({
-    name: 'eligibility-tools',
-    version: '1.0.0',
-    tools: [
-      // NPI Lookup Tool
-      tool(
-        'lookup_npi',
-        'Validate NPI format and lookup provider details from NPPES registry. Use this when you have an NPI and want to verify it or get provider details.',
-        {
-          npi: z.string().describe('10-digit NPI number to lookup'),
-        },
-        async (args) => {
-          const result = await executeTool('lookup_npi', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // NPI Search Tool
-      tool(
-        'search_npi',
-        'Search NPPES registry for providers by name. Use this when you need to find an NPI for a provider.',
-        {
-          firstName: z.string().describe('Provider first name'),
-          lastName: z.string().describe('Provider last name'),
-          state: z.string().optional().describe('2-letter state code to narrow search'),
-        },
-        async (args) => {
-          const result = await executeTool('search_npi', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // Payer Search Tool
-      tool(
-        'search_payers',
-        'Search Stedi payer directory by name. Returns payer IDs needed for eligibility checks.',
-        {
-          query: z.string().describe('Payer name to search (fuzzy match supported)'),
-        },
-        async (args) => {
-          const result = await executeTool('search_payers', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // Get Payer Mapping Tool
-      tool(
-        'get_payer_mapping',
-        'Check if we have a known Stedi payer ID mapping for this payer name. Check this before searching.',
-        {
-          payerName: z.string().describe('Payer name to lookup'),
-        },
-        async (args) => {
-          const result = await executeTool('get_payer_mapping', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // Save Payer Mapping Tool
-      tool(
-        'save_payer_mapping',
-        'Save a successful payer name to Stedi ID mapping for future use.',
-        {
-          payerName: z.string().describe('Original payer name from FHIR/user'),
-          stediPayerId: z.string().describe('Stedi payer ID that worked'),
-          stediPayerName: z.string().optional().describe('Display name from Stedi'),
-        },
-        async (args) => {
-          const result = await executeTool('save_payer_mapping', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // Check Eligibility Tool
-      tool(
-        'check_eligibility',
-        'Submit X12 270 eligibility check to Stedi. Returns detailed coverage information. IMPORTANT: You must provide provider name (either organizationName OR firstName+lastName) - get this from the NPI lookup result.',
-        {
-          stediPayerId: z.string().describe('Stedi payer ID (from search_payers or get_payer_mapping)'),
-          memberId: z.string().describe('Insurance member ID'),
-          patientFirstName: z.string().describe('Patient first name'),
-          patientLastName: z.string().describe('Patient last name'),
-          patientDob: z.string().describe('Patient date of birth (YYYY-MM-DD)'),
-          providerNpi: z.string().describe('10-digit provider NPI'),
-          providerFirstName: z.string().optional().describe('Provider first name (required if no organizationName)'),
-          providerLastName: z.string().optional().describe('Provider last name (required if no organizationName)'),
-          providerOrganizationName: z.string().optional().describe('Provider organization name (required if no firstName/lastName)'),
-          serviceTypeCode: z.string().optional().describe('Service type code (default: 30 for Health Benefit Plan Coverage)'),
-          groupNumber: z.string().optional().describe('Insurance group number if known'),
-        },
-        async (args) => {
-          const result = await executeTool('check_eligibility', args);
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-
-      // Insurance Discovery Tool
-      tool(
-        'discover_insurance',
-        'Find patient insurance coverage when payer is unknown. Slower (up to 120s). Use as last resort when you have no payer information. Requires provider NPI.',
-        {
-          firstName: z.string().describe('Patient first name'),
-          lastName: z.string().describe('Patient last name'),
-          dateOfBirth: z.string().describe('Patient date of birth (YYYY-MM-DD)'),
-          providerNpi: z.string().describe('10-digit provider NPI (required for discovery)'),
-          street: z.string().optional().describe('Street address (improves accuracy)'),
-          city: z.string().optional().describe('City'),
-          state: z.string().optional().describe('2-letter state code'),
-          zipCode: z.string().optional().describe('ZIP code (improves accuracy)'),
-          ssn: z.string().optional().describe('Last 4 digits of SSN (improves accuracy)'),
-          gender: z.enum(['M', 'F']).optional().describe('Patient gender (M or F)'),
-        },
-        async (args) => {
-          const result = await executeTool('discover_insurance', {
-            firstName: args.firstName,
-            lastName: args.lastName,
-            dateOfBirth: args.dateOfBirth,
-            providerNpi: args.providerNpi,
-            address: args.street ? {
-              street: args.street,
-              city: args.city,
-              state: args.state,
-              zipCode: args.zipCode,
-            } : undefined,
-            ssn: args.ssn,
-            gender: args.gender,
-          });
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          };
-        }
-      ),
-    ],
-  });
-}
-
-/**
- * Run the eligibility agent using Claude Agent SDK.
+ * Run the eligibility agent using Anthropic SDK directly.
  * Yields events for streaming to the client.
  */
 export async function* runEligibilityAgent(
   input: AgentInput
 ): AsyncGenerator<AgentEvent> {
+  const client = new Anthropic();
+
   // Build structured data context
   const dataContext = buildDataContext({
     patient: {
@@ -223,148 +177,119 @@ ${dataContext}
 
 ${input.cardImage ? 'An insurance card image is attached. Extract payer name, member ID, and group number from it to supplement the FHIR data above.\n\n' : ''}Analyze this data and perform an eligibility check. Think through what you have, what's missing, and your approach before taking action.`;
 
-  // Create MCP server with our tools
-  const eligibilityServer = createEligibilityTools();
-
   // Track usage
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let eligibilityResult: EligibilityResponse | undefined;
 
-  // Track tool_use_id -> tool_name mapping for matching tool_start/tool_end
-  const toolUseIdToName = new Map<string, string>();
+  // Conversation messages
+  const messages: Anthropic.MessageParam[] = [
+    { role: 'user', content: promptText },
+  ];
 
   // Accumulate text output for parsing structured JSON at the end
   let accumulatedText = '';
 
-  // Create async generator for streaming input mode (REQUIRED for MCP tools)
-  // Per SDK docs: generator yields message(s), then completes. SDK handles the rest.
-  async function* generateMessages() {
-    yield {
-      type: 'user' as const,
-      message: {
-        role: 'user' as const,
-        content: promptText,
-      },
-    };
-  }
-
   try {
-    // Use streaming input mode (required for MCP servers/custom tools)
-    for await (const message of query({
-      // Cast to any to work around SDK type strictness - runtime works correctly
-      prompt: generateMessages() as any,
-      options: {
-        systemPrompt: ELIGIBILITY_SYSTEM_PROMPT,
-        mcpServers: {
-          'eligibility-tools': eligibilityServer,
-        },
-        maxTurns: AGENT_LIMITS.MAX_TURNS,
-        maxThinkingTokens: AGENT_LIMITS.THINKING_BUDGET_TOKENS,
+    let turnCount = 0;
+    const maxTurns = AGENT_LIMITS.MAX_TURNS;
+
+    while (turnCount < maxTurns) {
+      turnCount++;
+
+      // Make API call
+      const response = await client.messages.create({
         model: 'claude-sonnet-4-20250514',
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-      },
-    })) {
-      if (message.type === 'assistant') {
-        // Process assistant message content
-        const msg = message as any;
-        const content = msg.message?.content || msg.content;
+        max_tokens: 8192,
+        system: ELIGIBILITY_SYSTEM_PROMPT,
+        tools: TOOLS,
+        messages,
+      });
 
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (typeof block === 'object' && block !== null) {
-              if ('type' in block && block.type === 'thinking' && 'thinking' in block) {
-                yield {
-                  type: 'thinking',
-                  thinking: String(block.thinking),
-                };
-              } else if ('type' in block && block.type === 'text' && 'text' in block) {
-                const textContent = String(block.text);
-                accumulatedText += textContent;
-                yield {
-                  type: 'text',
-                  text: textContent,
-                };
-              } else if ('type' in block && block.type === 'tool_use' && 'name' in block) {
-                const toolName = String(block.name);
-                const toolId = 'id' in block ? String(block.id) : '';
+      // Track usage
+      totalInputTokens += response.usage.input_tokens;
+      totalOutputTokens += response.usage.output_tokens;
 
-                // Track the mapping so we can match tool_end events
-                if (toolId) {
-                  toolUseIdToName.set(toolId, toolName);
-                }
+      // Process response content
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
-                yield {
-                  type: 'tool_start',
-                  tool: toolName,
-                  input: ('input' in block ? block.input : {}) as Record<string, unknown>,
-                };
-              }
-            }
-          }
-        } else if (typeof content === 'string') {
+      for (const block of response.content) {
+        if (block.type === 'thinking') {
+          yield {
+            type: 'thinking',
+            thinking: block.thinking,
+          };
+        } else if (block.type === 'text') {
+          accumulatedText += block.text;
           yield {
             type: 'text',
-            text: content,
+            text: block.text,
           };
-        }
-      } else if (message.type === 'user') {
-        // Tool results come back as user messages
-        const msg = message as any;
-        const content = msg.message?.content || msg.content;
-
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (typeof block === 'object' && block !== null && 'type' in block && block.type === 'tool_result') {
-              // Get the tool name from our tracking map
-              const toolUseId = 'tool_use_id' in block ? String(block.tool_use_id) : '';
-              const toolName = toolUseIdToName.get(toolUseId) || 'unknown';
-
-              // Parse the tool result to check for eligibility data
-              try {
-                const blockContent = 'content' in block ? block.content : '';
-                const resultContent = typeof blockContent === 'string'
-                  ? blockContent
-                  : JSON.stringify(blockContent);
-                const parsed = JSON.parse(resultContent);
-
-                // Check if this is an eligibility result
-                if (parsed?.success && parsed?.data?.status) {
-                  eligibilityResult = parsed.data;
-                }
-
-                yield {
-                  type: 'tool_end',
-                  tool: toolName,
-                  result: parsed,
-                };
-              } catch {
-                yield {
-                  type: 'tool_end',
-                  tool: toolName,
-                  result: 'content' in block ? block.content : null,
-                };
-              }
-            }
-          }
-        }
-      } else if (message.type === 'result') {
-        // Final result
-        const msg = message as any;
-
-        if (msg.usage) {
-          totalInputTokens = msg.usage.input_tokens || 0;
-          totalOutputTokens = msg.usage.output_tokens || 0;
-        }
-
-        if (msg.subtype !== 'success' && msg.errors) {
+        } else if (block.type === 'tool_use') {
           yield {
-            type: 'error',
-            message: (msg.errors as string[]).join('; '),
+            type: 'tool_start',
+            tool: block.name,
+            input: block.input as Record<string, unknown>,
           };
-          return;
+
+          // Execute the tool
+          let toolInput = block.input as Record<string, unknown>;
+
+          // Special handling for discover_insurance
+          if (block.name === 'discover_insurance') {
+            toolInput = {
+              firstName: toolInput.firstName,
+              lastName: toolInput.lastName,
+              dateOfBirth: toolInput.dateOfBirth,
+              providerNpi: toolInput.providerNpi,
+              address: toolInput.street ? {
+                street: toolInput.street,
+                city: toolInput.city,
+                state: toolInput.state,
+                zipCode: toolInput.zipCode,
+              } : undefined,
+              ssn: toolInput.ssn,
+              gender: toolInput.gender,
+            };
+          }
+
+          const result = await executeTool(block.name, toolInput);
+
+          // Check if this is an eligibility result
+          if (result?.success && result?.data?.status) {
+            eligibilityResult = result.data;
+          }
+
+          yield {
+            type: 'tool_end',
+            tool: block.name,
+            result,
+          };
+
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result),
+          });
         }
+      }
+
+      // Add assistant response to messages
+      messages.push({ role: 'assistant', content: response.content });
+
+      // If there were tool calls, add the results and continue
+      if (toolResults.length > 0) {
+        messages.push({ role: 'user', content: toolResults });
+      }
+
+      // Check if we should stop
+      if (response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence') {
+        break;
+      }
+
+      // If no tool use and not end_turn, something unexpected happened
+      if (toolResults.length === 0 && response.stop_reason !== 'tool_use') {
+        break;
       }
     }
 
