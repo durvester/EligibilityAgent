@@ -3,14 +3,8 @@ const nextConfig = {
   transpilePackages: ['@eligibility-agent/shared'],
   // Enable standalone output for Docker deployments
   output: 'standalone',
-  async rewrites() {
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${process.env.API_URL || 'http://localhost:3001'}/:path*`,
-      },
-    ];
-  },
+  // NOTE: API proxying handled by Route Handlers in src/app/api/
+  // Route Handlers properly forward cookies, unlike rewrites()
 };
 
 module.exports = nextConfig;
