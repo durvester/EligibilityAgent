@@ -1,0 +1,127 @@
+// Prisma Schema for SMART on FHIR Eligibility Agent
+// Database: PostgreSQL (Azure)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Multi-tenant practices
+model Tenant {
+  id                     String   @id @default(uuid())
+  name                   String
+  fhirBaseUrl            String   @map("fhir_base_url")
+  clientId               String   @map("client_id")
+  clientSecretEncrypted  String   @map("client_secret_encrypted")
+  stediApiKeyEncrypted   String   @map("stedi_api_key_encrypted")
+  stediPartnerId         String?  @map("stedi_partner_id")
+  logoUrl                String?  @map("logo_url")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  oauthTokens        OAuthToken[]
+  eligibilityChecks  EligibilityCheck[]
+  auditLogs          AuditLog[]
+
+  @@map("tenants")
+}
+
+// OAuth tokens per tenant (encrypted at rest)
+model OAuthToken {
+  id                    String    @id @default(uuid())
+  tenantId              String    @map("tenant_id")
+  userFhirId            String?   @map("user_fhir_id")
+  accessTokenEncrypted  String    @map("access_token_encrypted")
+  refreshTokenEncrypted String?   @map("refresh_token_encrypted")
+  tokenType             String    @default("Bearer") @map("token_type")
+  expiresAt             DateTime  @map("expires_at")
+  scope                 String?
+  patientId             String?   @map("patient_id")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("oauth_tokens")
+}
+
+// Eligibility check history
+model EligibilityCheck {
+  id                  String    @id @default(uuid())
+  tenantId            String    @map("tenant_id")
+  patientFhirId       String    @map("patient_fhir_id")
+  patientName         String?   @map("patient_name")
+  patientDob          DateTime? @map("patient_dob") @db.Date
+  payerName           String?   @map("payer_name")
+  stediPayerId        String?   @map("stedi_payer_id")
+  memberId            String?   @map("member_id")
+  groupNumber         String?   @map("group_number")
+  providerNpi         String?   @map("provider_npi")
+  serviceTypeCode     String?   @map("service_type_code")
+  requestPayload      Json?     @map("request_payload")
+  responsePayload     Json?     @map("response_payload")
+  coverageStatus      String?   @map("coverage_status")
+  effectiveDate       DateTime? @map("effective_date") @db.Date
+  terminationDate     DateTime? @map("termination_date") @db.Date
+  copayAmount         Decimal?  @map("copay_amount") @db.Decimal(10, 2)
+  deductibleAmount    Decimal?  @map("deductible_amount") @db.Decimal(10, 2)
+  deductibleRemaining Decimal?  @map("deductible_remaining") @db.Decimal(10, 2)
+  oopMax              Decimal?  @map("oop_max") @db.Decimal(10, 2)
+  oopRemaining        Decimal?  @map("oop_remaining") @db.Decimal(10, 2)
+  pdfUrl              String?   @map("pdf_url")
+  jsonUrl             String?   @map("json_url")
+  writtenToEhr        Boolean   @default(false) @map("written_to_ehr")
+  writtenAt           DateTime? @map("written_at")
+  createdBy           String?   @map("created_by")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, patientFhirId])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("eligibility_checks")
+}
+
+// HIPAA audit log
+model AuditLog {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  userFhirId    String?  @map("user_fhir_id")
+  userName      String?  @map("user_name")
+  action        String
+  resourceType  String?  @map("resource_type")
+  resourceId    String?  @map("resource_id")
+  patientFhirId String?  @map("patient_fhir_id")
+  requestIp     String?  @map("request_ip")
+  userAgent     String?  @map("user_agent")
+  details       Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, patientFhirId])
+  @@map("audit_logs")
+}
+
+// Payer name to Stedi ID mappings (shared across all tenants)
+// Agent learns these mappings and saves them for future use
+model PayerMapping {
+  id              String   @id @default(uuid())
+  payerName       String   @map("payer_name")
+  payerNameNorm   String   @map("payer_name_normalized") // lowercase, trimmed
+  stediPayerId    String   @map("stedi_payer_id")
+  stediPayerName  String   @map("stedi_payer_name")
+  usageCount      Int      @default(1) @map("usage_count")
+  lastUsedAt      DateTime @default(now()) @map("last_used_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([payerNameNorm])
+  @@index([stediPayerId])
+  @@map("payer_mappings")
+}

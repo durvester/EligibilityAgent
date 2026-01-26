@@ -1,0 +1,32 @@
+{
+  "name": "eligibility-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SMART on FHIR Eligibility Agent - Practice Fusion integration with Claude Agent",
+  "type": "module",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:web": "turbo run dev --filter=@eligibility-agent/web",
+    "dev:api": "turbo run dev --filter=@eligibility-agent/api",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "db:generate": "turbo run db:generate --filter=@eligibility-agent/db",
+    "db:migrate": "turbo run db:migrate --filter=@eligibility-agent/db",
+    "db:push": "turbo run db:push --filter=@eligibility-agent/db",
+    "db:studio": "pnpm --filter @eligibility-agent/db db:studio",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json}\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "prettier": "^3.2.5",
+    "turbo": "^2.3.4",
+    "typescript": "^5.7.3"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}
