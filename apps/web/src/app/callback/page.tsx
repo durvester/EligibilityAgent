@@ -63,7 +63,8 @@ function CallbackContent() {
 
         // Cookie is set by backend - no sessionStorage needed
         // Just redirect to eligibility page with patient context
-        const patientId = data.patient || searchParams.get('patient');
+        // API returns 'patientId', not 'patient'
+        const patientId = data.patientId || searchParams.get('patient');
         router.push(`/eligibility${patientId ? `?patient=${patientId}` : ''}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Authentication failed');
