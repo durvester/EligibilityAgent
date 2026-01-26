@@ -91,7 +91,7 @@ function EligibilityContent() {
     }
   }, []);
 
-  // Fetch patient data on mount
+  // Fetch patient data on mount using cookie-based auth
   useEffect(() => {
     async function fetchPatientData() {
       if (!patientId) {
@@ -99,26 +99,21 @@ function EligibilityContent() {
         return;
       }
 
-      const accessToken = sessionStorage.getItem('smart_access_token');
-      const fhirBaseUrl = sessionStorage.getItem('smart_fhir_base_url');
-      const fhirUser = sessionStorage.getItem('smart_fhir_user');
-
-      if (!accessToken || !fhirBaseUrl) {
-        setState(s => ({ ...s, isLoading: false, error: 'Not authenticated. Please launch from EHR.' }));
-        return;
-      }
-
       try {
-        const headers: Record<string, string> = {
-          'Authorization': `Bearer ${accessToken}`,
-          'X-FHIR-Base-URL': fhirBaseUrl,
-        };
+        // First verify we have a valid session
+        const authResponse = await fetch('/api/auth/me', {
+          credentials: 'include',
+        });
 
-        if (fhirUser) {
-          headers['X-FHIR-User'] = fhirUser;
+        if (!authResponse.ok) {
+          setState(s => ({ ...s, isLoading: false, error: 'Not authenticated. Please launch from EHR.' }));
+          return;
         }
 
-        const response = await fetch(`/api/fhir/patient/${patientId}`, { headers });
+        // Fetch patient data - session provides auth context via cookie
+        const response = await fetch(`/api/fhir/patient/${patientId}`, {
+          credentials: 'include',
+        });
         const data = await response.json();
 
         if (!response.ok) {
@@ -369,7 +364,7 @@ function EligibilityContent() {
   // Save results to EHR
   const saveToEhr = useCallback(async () => {
     // TODO: Implement EHR write-back
-    console.log('Save to EHR not yet implemented');
+    // This is a placeholder for future implementation
   }, []);
 
   if (state.isLoading) {

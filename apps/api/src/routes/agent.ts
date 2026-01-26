@@ -8,7 +8,8 @@
 import { FastifyPluginAsync } from 'fastify';
 import fastifySSE from '@fastify/sse';
 import type { AgentInput, AgentEvent, FhirPatient, FhirCoverage, FhirPractitioner } from '@eligibility-agent/shared';
-import { runEligibilityAgent } from '../services/agent/loop.js';
+import { runEligibilityAgent, type AgentContext } from '../services/agent/loop.js';
+import { auditEligibilityCheck } from '../services/audit-service.js';
 
 interface EligibilityAgentBody {
   patient: AgentInput['patient'];
@@ -136,6 +137,21 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
       rawFhir,
     };
 
+    // Build context for persistence (if we have a session)
+    const context: AgentContext | undefined = request.session ? {
+      tenantId: request.session.tenantId,
+      sessionId: request.session.id,
+      patientFhirId: patient.fhirId || 'unknown',
+    } : undefined;
+
+    // Audit the eligibility check start
+    if (request.session) {
+      auditEligibilityCheck(request, patient.fhirId || 'unknown', true, {
+        hasInsurance: !!insurance,
+        hasProvider: !!provider,
+      });
+    }
+
     // Track disconnection via onClose handler
     let clientDisconnected = false;
 
@@ -146,8 +162,8 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
 
     let eventCount = 0;
     try {
-      // Run the agent and stream events
-      for await (const event of runEligibilityAgent(input)) {
+      // Run the agent and stream events (pass context for persistence)
+      for await (const event of runEligibilityAgent(input, context)) {
         eventCount++;
 
         if (clientDisconnected || !reply.sse.isConnected) {

@@ -9,6 +9,10 @@ primary_region = "iad"
   HOST = "0.0.0.0"
   NODE_ENV = "production"
 
+# Run database migrations on deploy (before starting the app)
+[deploy]
+  release_command = "npx prisma db push --schema=./packages/db/prisma/schema.prisma --accept-data-loss"
+
 [http_service]
   internal_port = 8080
   force_https = true

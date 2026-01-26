@@ -6,6 +6,7 @@
 
 import axios from 'axios';
 import type { StediPayer, PayerSearchResult } from '@eligibility-agent/shared';
+import { serviceLogger } from '../lib/logger.js';
 
 const STEDI_API_URL = process.env.STEDI_API_URL || 'https://healthcare.us.stedi.com/2024-04-01';
 
@@ -77,14 +78,14 @@ export async function searchPayers(query: string): Promise<PayerSearchResult> {
     // Filter to only payers that support eligibility checks
     const eligiblePayers = payers.filter(p => p.eligibilitySupported);
 
-    console.log(`[PayerSearch] Query "${query}" found ${eligiblePayers.length} payers with eligibility support`);
+    serviceLogger.info({ query, resultCount: eligiblePayers.length }, 'Payer search completed');
 
     return {
       payers: eligiblePayers,
       total: response.data.stats?.total || eligiblePayers.length,
     };
   } catch (error) {
-    console.error('[PayerSearch] Search failed:', error);
+    serviceLogger.error({ error: error instanceof Error ? error.message : 'Unknown' }, 'Payer search failed');
 
     if (axios.isAxiosError(error) && error.response) {
       throw new Error(`Payer search failed: ${error.response.status} - ${error.response.data?.message || 'Unknown error'}`);
@@ -123,7 +124,7 @@ export async function getPayerById(stediId: string): Promise<StediPayer | null> 
       eligibilitySupported: payer.transactionSupport?.eligibilityCheck === 'SUPPORTED',
     };
   } catch (error) {
-    console.error(`[PayerSearch] Failed to get payer ${stediId}:`, error);
+    serviceLogger.error({ stediId, error: error instanceof Error ? error.message : 'Unknown' }, 'Failed to get payer');
     return null;
   }
 }

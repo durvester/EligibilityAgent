@@ -29,6 +29,7 @@ Documentation/        # Reference documentation
 fly.api.toml          # Fly.io API config
 fly.web.toml          # Fly.io Web config
 ROADMAP.md            # Feature roadmap with epics
+CODE_AUDIT.md         # Security, performance, quality audit
 ```
 
 ---
@@ -233,8 +234,39 @@ See `SPECIFICATION.md` Section 6.2 for implementation status.
 **Low Priority:**
 - Practice Fusion proprietary API integration (insurance write-back)
 - Eligibility history UI
-- Audit logging
 - Agent evaluations
+
+---
+
+## Code Audit Summary
+
+See `CODE_AUDIT.md` for full audit report covering security, performance, and quality.
+
+### Critical Issues (Must Fix Before Production PHI)
+
+| Issue | Category | Location |
+|-------|----------|----------|
+| PHI logged to stdout | Security | `services/stedi.ts`, `services/agent/executor.ts` |
+| No route authorization | Security | `routes/agent.ts`, `routes/eligibility.ts` |
+| Zero automated tests | Quality | Entire codebase |
+| No rate limiting | Security | All API endpoints |
+| Blocking crypto | Performance | `lib/encryption.ts` |
+| No audit trail | Compliance | `AuditLog` table unused |
+
+### Key Findings
+
+- **Test Coverage**: 0% - No test framework configured
+- **Console.log statements**: 25+ should be replaced with Fastify logger
+- **Security**: PHI (names, DOBs, member IDs) logged; missing authorization on agent endpoint
+- **Performance**: Synchronous scrypt blocks event loop; missing database indexes
+- **Dependencies**: `pdfkit` unused; missing env validation at startup
+
+### Before Accepting PRs
+
+1. Run `pnpm build` - must pass
+2. No new `console.log` statements (use `fastify.log`)
+3. No PHI in logs (mask or omit sensitive data)
+4. Add tests for new functionality
 
 ## What's Done
 

@@ -1,20 +1,67 @@
+/**
+ * FHIR Routes
+ *
+ * Provides FHIR proxy endpoints for fetching patient data.
+ * All routes require authentication - access tokens are retrieved from the session.
+ *
+ * The session middleware ensures:
+ * 1. Valid internal JWT from cookie
+ * 2. Session attached to request
+ * 3. PF access token retrieved from database (auto-refreshed if needed)
+ */
+
 import { FastifyPluginAsync } from 'fastify';
 import axios from 'axios';
+import { prisma } from '@eligibility-agent/db';
 import type { FhirPatient, FhirCoverage, FhirPractitioner, PatientInfo, InsuranceInfo, ProviderInfo } from '@eligibility-agent/shared';
+import { getPfToken } from '../services/session-service.js';
+import { auditViewPatient, auditViewCoverage } from '../services/audit-service.js';
 
-function getAccessToken(request: { headers: { authorization?: string } }): string | null {
-  const auth = request.headers.authorization;
-  if (auth?.startsWith('Bearer ')) {
-    return auth.slice(7);
+/**
+ * Allowed FHIR server domains.
+ * Add trusted domains here.
+ */
+const ALLOWED_FHIR_DOMAINS = [
+  'practicefusion.com',
+  'localhost', // Development only
+];
+
+/**
+ * Validate that a FHIR URL is from an allowed domain.
+ * Prevents SSRF attacks by restricting which servers we proxy to.
+ */
+function isAllowedFhirUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+
+    // Must be HTTPS in production
+    if (process.env.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    // Allow localhost in development
+    if (process.env.NODE_ENV !== 'production' && parsed.hostname === 'localhost') {
+      return true;
+    }
+
+    // Check against allowed domains
+    return ALLOWED_FHIR_DOMAINS.some(domain =>
+      parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`)
+    );
+  } catch {
+    return false;
   }
-  return null;
 }
 
-function getFhirBaseUrl(request: { headers: Record<string, string | string[] | undefined> }): string | null {
-  const value = request.headers['x-fhir-base-url'];
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value[0] || null;
-  return null;
+/**
+ * Get FHIR base URL for the tenant.
+ */
+async function getFhirBaseUrl(tenantId: string): Promise<string | null> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { issuer: true },
+  });
+  return tenant?.issuer || null;
 }
 
 function transformPatient(fhir: FhirPatient): PatientInfo {
@@ -22,7 +69,6 @@ function transformPatient(fhir: FhirPatient): PatientInfo {
   const address = fhir.address?.[0];
 
   // Extract SSN from identifiers
-  // Common systems: http://hl7.org/fhir/sid/us-ssn, urn:oid:2.16.840.1.113883.4.1
   const ssnIdentifier = fhir.identifier?.find(id =>
     id.system === 'http://hl7.org/fhir/sid/us-ssn' ||
     id.system === 'urn:oid:2.16.840.1.113883.4.1' ||
@@ -58,7 +104,6 @@ function transformCoverage(fhir: FhirCoverage & {
   );
 
   // Practice Fusion stores member ID in extension: coverage-insured-unique-id
-  // This is the primary source for member ID
   const memberIdExtension = fhir.extension?.find(
     ext => ext.url?.includes('coverage-insured-unique-id')
   );
@@ -90,33 +135,45 @@ function transformPractitioner(fhir: FhirPractitioner): ProviderInfo {
 
 const fhirRoutes: FastifyPluginAsync = async (fastify) => {
   /**
-   * Get patient with coverage and practitioners
+   * Get patient with coverage and practitioners.
    *
-   * Requires:
-   * - Authorization: Bearer <access_token>
-   * - X-FHIR-Base-URL: <fhir_base_url from token response>
-   * Optional:
-   * - X-FHIR-User: <fhirUser from token response> - to identify logged-in user
+   * Access token is retrieved from the session (not headers).
+   * FHIR base URL comes from the tenant's issuer.
    */
   fastify.get<{ Params: { patientId: string } }>('/patient/:patientId', async (request, reply) => {
     const { patientId } = request.params;
-    const accessToken = getAccessToken(request);
-    const fhirBaseUrl = getFhirBaseUrl(request);
-    // Get fhirUser header - this identifies the logged-in practitioner
-    const fhirUserHeader = request.headers['x-fhir-user'];
-    const fhirUser = typeof fhirUserHeader === 'string' ? fhirUserHeader : fhirUserHeader?.[0];
+    const session = request.session;
 
-    if (!accessToken) {
+    if (!session) {
       return reply.status(401).send({
         success: false,
-        error: { code: 'UNAUTHORIZED', message: 'Missing access token. Include Authorization: Bearer <token> header.' },
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
       });
     }
 
+    // Get FHIR base URL from tenant
+    const fhirBaseUrl = await getFhirBaseUrl(session.tenantId);
     if (!fhirBaseUrl) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'TENANT_CONFIG_ERROR', message: 'Tenant FHIR configuration not found' },
+      });
+    }
+
+    // Validate FHIR URL is from allowed domain
+    if (!isAllowedFhirUrl(fhirBaseUrl)) {
       return reply.status(400).send({
         success: false,
-        error: { code: 'MISSING_FHIR_URL', message: 'Missing X-FHIR-Base-URL header. This should be the fhirBaseUrl from the token response.' },
+        error: { code: 'INVALID_FHIR_URL', message: 'FHIR base URL is not from an allowed domain.' },
+      });
+    }
+
+    // Get PF access token from session (auto-refreshes if needed)
+    const accessToken = await getPfToken(session.id, fhirBaseUrl);
+    if (!accessToken) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
       });
     }
 
@@ -126,19 +183,13 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     try {
-      // Extract practitioner ID from fhirUser first (e.g., "Practitioner/123" -> "123")
+      // Extract practitioner ID from session's userFhirId
       let loggedInProviderId: string | null = null;
-      fastify.log.info({ fhirUserHeader: fhirUser }, 'fhirUser header received');
-      if (fhirUser) {
-        const match = fhirUser.match(/Practitioner\/([^/]+)$/);
+      if (session.userFhirId) {
+        const match = session.userFhirId.match(/Practitioner\/([^/]+)$/);
         if (match) {
           loggedInProviderId = match[1];
-          fastify.log.info({ loggedInProviderId }, 'Extracted practitioner ID from fhirUser');
-        } else {
-          fastify.log.warn({ fhirUser }, 'fhirUser did not match Practitioner pattern');
         }
-      } else {
-        fastify.log.warn('No fhirUser header provided');
       }
 
       // Fetch Patient, Coverage, and Practitioner in PARALLEL for speed
@@ -146,17 +197,14 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       const startTime = Date.now();
 
       const [patientResult, coverageResult, practitionerResult] = await Promise.allSettled([
-        // 1. Patient (required)
         axios.get<FhirPatient>(
           `${fhirBaseUrl}/Patient/${patientId}`,
           { headers, timeout: 15000 }
         ),
-        // 2. Coverage (optional)
         axios.get<{ entry?: Array<{ resource: FhirCoverage }> }>(
           `${fhirBaseUrl}/Coverage?patient=${patientId}`,
           { headers, timeout: 15000 }
         ),
-        // 3. Practitioner (optional - only if we have the ID)
         loggedInProviderId
           ? axios.get<FhirPractitioner>(
               `${fhirBaseUrl}/Practitioner/${loggedInProviderId}`,
@@ -173,25 +221,18 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       }
       const patient = transformPatient(patientResult.value.data);
 
+      // Audit the patient view
+      auditViewPatient(request, patientId);
+
       // Process Coverage (optional)
       let insurance: InsuranceInfo | null = null;
       if (coverageResult.status === 'fulfilled' && coverageResult.value) {
         const coverageResource = coverageResult.value.data.entry?.[0]?.resource;
 
-        // Log the raw coverage resource to understand its structure
-        fastify.log.info({
-          coverageRaw: JSON.stringify(coverageResource, null, 2),
-          hasIdentifier: !!coverageResource?.identifier,
-          identifierCount: (coverageResource as any)?.identifier?.length,
-          subscriberId: coverageResource?.subscriberId,
-        }, 'Raw Coverage resource from FHIR');
-
         if (coverageResource) {
           insurance = transformCoverage(coverageResource);
-          fastify.log.info({
-            transformedMemberId: insurance.memberId,
-            transformedPayer: insurance.payerName
-          }, 'Transformed insurance info');
+          // Audit the coverage view
+          auditViewCoverage(request, patientId, coverageResource.id);
         }
       } else if (coverageResult.status === 'rejected') {
         fastify.log.warn({ error: coverageResult.reason }, 'Failed to fetch coverage');
@@ -256,22 +297,40 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * List practitioners with pagination (lazy scroll support)
-   *
-   * Query params:
-   * - _count: number of items per page (default 20)
-   * - _offset: skip this many items (for pagination)
+   * List practitioners with pagination (lazy scroll support).
    */
   fastify.get<{ Querystring: { _count?: string; _offset?: string } }>('/practitioners', async (request, reply) => {
-    const accessToken = getAccessToken(request);
-    const fhirBaseUrl = getFhirBaseUrl(request);
+    const session = request.session;
     const count = parseInt(request.query._count || '20', 10);
     const offset = parseInt(request.query._offset || '0', 10);
 
-    if (!accessToken || !fhirBaseUrl) {
+    if (!session) {
       return reply.status(401).send({
         success: false,
-        error: { code: 'UNAUTHORIZED', message: 'Missing credentials' },
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
+      });
+    }
+
+    const fhirBaseUrl = await getFhirBaseUrl(session.tenantId);
+    if (!fhirBaseUrl) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'TENANT_CONFIG_ERROR', message: 'Tenant FHIR configuration not found' },
+      });
+    }
+
+    if (!isAllowedFhirUrl(fhirBaseUrl)) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_FHIR_URL', message: 'FHIR base URL is not from an allowed domain.' },
+      });
+    }
+
+    const accessToken = await getPfToken(session.id, fhirBaseUrl);
+    if (!accessToken) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
       });
     }
 
@@ -281,8 +340,6 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
     };
 
     try {
-      // Fetch practitioners with pagination
-      // Note: FHIR uses _count for page size and _offset for pagination
       const searchUrl = `${fhirBaseUrl}/Practitioner?_count=${count}&_offset=${offset}&_sort=family`;
 
       fastify.log.info({ searchUrl, count, offset }, 'Fetching practitioners');
@@ -299,7 +356,6 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
         .map(e => transformPractitioner(e.resource))
         .filter(p => p.firstName || p.lastName);
 
-      // Check if there are more items
       const total = practResponse.data.total;
       const hasMore = total ? (offset + practitioners.length) < total : practitioners.length === count;
 
@@ -323,24 +379,39 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * Generic FHIR resource fetch
+   * Generic FHIR resource fetch.
    */
   fastify.get<{ Params: { resourceType: string; resourceId: string } }>('/:resourceType/:resourceId', async (request, reply) => {
     const { resourceType, resourceId } = request.params;
-    const accessToken = getAccessToken(request);
-    const fhirBaseUrl = getFhirBaseUrl(request);
+    const session = request.session;
 
-    if (!accessToken) {
+    if (!session) {
       return reply.status(401).send({
         success: false,
-        error: { code: 'UNAUTHORIZED', message: 'Missing access token' },
+        error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
       });
     }
 
+    const fhirBaseUrl = await getFhirBaseUrl(session.tenantId);
     if (!fhirBaseUrl) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'TENANT_CONFIG_ERROR', message: 'Tenant FHIR configuration not found' },
+      });
+    }
+
+    if (!isAllowedFhirUrl(fhirBaseUrl)) {
       return reply.status(400).send({
         success: false,
-        error: { code: 'MISSING_FHIR_URL', message: 'Missing X-FHIR-Base-URL header' },
+        error: { code: 'INVALID_FHIR_URL', message: 'FHIR base URL is not from an allowed domain.' },
+      });
+    }
+
+    const accessToken = await getPfToken(session.id, fhirBaseUrl);
+    if (!accessToken) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
       });
     }
 

@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { serviceLogger } from '../lib/logger.js';
+import { cacheGet, cacheSet, CacheKeys, CacheTTL } from '../lib/redis.js';
 
 const NPI_REGISTRY_URL = process.env.NPI_REGISTRY_URL || 'https://npiregistry.cms.hhs.gov/api';
 
@@ -49,6 +51,14 @@ export async function lookupNpi(npi: string): Promise<NpiLookupResult> {
     return { valid: false, message: 'Invalid NPI checksum' };
   }
 
+  // Check Redis cache first
+  const cacheKey = CacheKeys.npi(npi);
+  const cached = await cacheGet<NpiLookupResult>(cacheKey);
+  if (cached) {
+    serviceLogger.debug({ npi }, 'NPI cache hit');
+    return cached;
+  }
+
   try {
     const response = await axios.get(NPI_REGISTRY_URL, {
       params: { version: '2.1', number: npi },
@@ -57,18 +67,19 @@ export async function lookupNpi(npi: string): Promise<NpiLookupResult> {
 
     const results = response.data.results || [];
     if (results.length === 0) {
-      return { valid: false, message: 'NPI not found in NPPES registry' };
+      const result: NpiLookupResult = { valid: false, message: 'NPI not found in NPPES registry' };
+      // Don't cache not-found results (might be temporary)
+      return result;
     }
 
     const result = results[0];
     const basic = result.basic || {};
-    const isOrg = result.enumeration_type === 'NPI-2';
-    const primaryTaxonomy = (result.taxonomies || []).find((t: any) => t.primary);
-    const practiceAddress = (result.addresses || []).find((a: any) =>
+    const primaryTaxonomy = (result.taxonomies || []).find((t: { primary?: boolean }) => t.primary);
+    const practiceAddress = (result.addresses || []).find((a: { address_purpose?: string }) =>
       a.address_purpose?.toLowerCase() === 'location'
     ) || result.addresses?.[0];
 
-    return {
+    const lookupResult: NpiLookupResult = {
       valid: true,
       npi: result.number,
       firstName: basic.first_name,
@@ -81,8 +92,12 @@ export async function lookupNpi(npi: string): Promise<NpiLookupResult> {
         state: practiceAddress.state,
       } : undefined,
     };
+
+    // Cache successful lookups in Redis
+    await cacheSet(cacheKey, lookupResult, CacheTTL.NPI);
+    return lookupResult;
   } catch (error) {
-    console.error('NPI lookup error:', error);
+    serviceLogger.error({ error: error instanceof Error ? error.message : 'Unknown' }, 'NPI lookup error');
     // Checksum valid, just couldn't verify with registry
     return {
       valid: true,
@@ -126,7 +141,7 @@ export async function searchNpi(params: {
       };
     });
   } catch (error) {
-    console.error('NPI search error:', error);
+    serviceLogger.error({ error: error instanceof Error ? error.message : 'Unknown' }, 'NPI search error');
     return [];
   }
 }

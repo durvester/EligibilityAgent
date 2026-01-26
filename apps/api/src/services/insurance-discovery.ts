@@ -11,6 +11,7 @@
 
 import axios from 'axios';
 import type { EligibilityResponse } from '@eligibility-agent/shared';
+import { serviceLogger } from '../lib/logger.js';
 
 const STEDI_API_URL = process.env.STEDI_API_URL || 'https://healthcare.us.stedi.com/2024-04-01';
 
@@ -102,7 +103,10 @@ export async function discoverInsurance(
     (request.subscriber as Record<string, unknown>).gender = params.gender;
   }
 
-  console.log('[InsuranceDiscovery] Submitting discovery request:', JSON.stringify(request, null, 2));
+  serviceLogger.info({
+    providerNpi: (request.provider as { npi: string }).npi,
+    hasAddress: !!(request.subscriber as { address?: unknown }).address,
+  }, 'Submitting insurance discovery request');
 
   try {
     const response = await axios.post(
@@ -117,13 +121,16 @@ export async function discoverInsurance(
       }
     );
 
-    console.log('[InsuranceDiscovery] Response received:', JSON.stringify(response.data, null, 2));
-
     const data = response.data;
+
+    serviceLogger.info({
+      discoveryId: data.discoveryId,
+      coveragesFound: data.coveragesFound || 0,
+    }, 'Insurance discovery response received');
 
     // Check for errors in response
     if (data.errors && data.errors.length > 0) {
-      console.log('[InsuranceDiscovery] Errors in response:', data.errors);
+      serviceLogger.warn({ errorCount: data.errors.length }, 'Discovery returned errors');
       // Return as NO_COVERAGE_FOUND with error info
       return {
         status: 'NO_COVERAGE_FOUND',
@@ -135,7 +142,7 @@ export async function discoverInsurance(
     // Check coverages found count
     const coveragesFound = data.coveragesFound || 0;
     if (coveragesFound === 0 || !data.items || data.items.length === 0) {
-      console.log('[InsuranceDiscovery] No coverages found');
+      serviceLogger.info({}, 'No coverages found');
       return {
         status: 'NO_COVERAGE_FOUND',
         discoveryId: data.discoveryId || '',
@@ -162,7 +169,7 @@ export async function discoverInsurance(
       };
     });
 
-    console.log(`[InsuranceDiscovery] Found ${coverages.length} coverage(s)`);
+    serviceLogger.info({ coverageCount: coverages.length }, 'Found coverages');
 
     return {
       status: 'COMPLETE',
@@ -170,11 +177,16 @@ export async function discoverInsurance(
       coverages,
     };
   } catch (error) {
-    console.error('[InsuranceDiscovery] Request failed:', error);
+    serviceLogger.error({
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }, 'Insurance discovery request failed');
 
     if (axios.isAxiosError(error) && error.response) {
       const errorData = error.response.data;
-      console.error('[InsuranceDiscovery] Error response:', JSON.stringify(errorData, null, 2));
+      serviceLogger.error({
+        status: error.response.status,
+        message: errorData?.message || errorData?.error,
+      }, 'Insurance discovery API error');
       throw new Error(
         `Insurance discovery failed: ${errorData?.message || errorData?.error || `HTTP ${error.response.status}`}`
       );

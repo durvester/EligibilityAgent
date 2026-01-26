@@ -3,6 +3,8 @@
  *
  * These are standard Anthropic tool definitions (JSON schema).
  * The agent decides which tools to use based on context.
+ *
+ * Note: Payer mapping tools removed - agent uses search_payers and its knowledge.
  */
 
 import type { Tool } from '@anthropic-ai/sdk/resources/messages';
@@ -56,42 +58,6 @@ export const ELIGIBILITY_TOOLS: Tool[] = [
         },
       },
       required: ['query'],
-    },
-  },
-  {
-    name: 'get_payer_mapping',
-    description: 'Check if we have a previously saved Stedi payer ID mapping for this payer name. Use this FIRST before search_payers to avoid redundant API calls. Returns null if no mapping exists.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        payerName: {
-          type: 'string',
-          description: 'Payer name to look up (case-insensitive)',
-        },
-      },
-      required: ['payerName'],
-    },
-  },
-  {
-    name: 'save_payer_mapping',
-    description: 'Save a successful payer name → Stedi ID mapping for future use. Call this AFTER a successful eligibility check to cache the mapping. This speeds up future checks for the same payer.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        payerName: {
-          type: 'string',
-          description: 'Original payer name from the request',
-        },
-        stediPayerId: {
-          type: 'string',
-          description: 'Stedi payer ID that worked (e.g., "KRPCH")',
-        },
-        stediPayerName: {
-          type: 'string',
-          description: 'Official payer name from Stedi',
-        },
-      },
-      required: ['payerName', 'stediPayerId'],
     },
   },
   {
@@ -183,4 +149,9 @@ export const ELIGIBILITY_TOOLS: Tool[] = [
   },
 ];
 
-export type ToolName = typeof ELIGIBILITY_TOOLS[number]['name'];
+export type ToolName =
+  | 'lookup_npi'
+  | 'search_npi'
+  | 'search_payers'
+  | 'check_eligibility'
+  | 'discover_insurance';

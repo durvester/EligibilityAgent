@@ -8,28 +8,35 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "clean": "rm -rf dist"
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
+    "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
+    "clean": "rm -rf dist coverage"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.19",
     "@anthropic-ai/sdk": "^0.71.2",
     "@eligibility-agent/db": "workspace:*",
     "@eligibility-agent/shared": "workspace:*",
+    "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^10.0.2",
     "@fastify/formbody": "^8.0.2",
     "@fastify/multipart": "^9.0.3",
+    "@fastify/rate-limit": "^10.3.0",
     "@fastify/sse": "^0.4.0",
+    "@upstash/redis": "^1.36.1",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
-    "pdfkit": "^0.16.0",
+    "jose": "^5.10.0",
     "uuid": "^11.0.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.10.5",
     "@types/pdfkit": "^0.13.8",
     "@types/uuid": "^10.0.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
