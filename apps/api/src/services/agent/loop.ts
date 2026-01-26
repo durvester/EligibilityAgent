@@ -256,8 +256,9 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
           const result = await executeTool(block.name, toolInput);
 
           // Check if this is an eligibility result
-          if (result?.success && result?.data?.status) {
-            eligibilityResult = result.data;
+          const resultData = result?.data as Record<string, unknown> | undefined;
+          if (result?.success && resultData?.status) {
+            eligibilityResult = resultData as unknown as EligibilityResponse;
           }
 
           yield {
