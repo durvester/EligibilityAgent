@@ -12,7 +12,7 @@ primary_region = "iad"
 # Run database migrations on deploy (before starting the app)
 # Pin Prisma version to match package.json (npx defaults to latest which may have breaking changes)
 [deploy]
-  release_command = "npx prisma@5.22.0 db push --schema=./packages/db/prisma/schema.prisma --accept-data-loss"
+  release_command = "npx prisma@5.22.0 db push --schema=./packages/db/prisma/schema.prisma --accept-data-loss --skip-generate"
 
 [http_service]
   internal_port = 8080
