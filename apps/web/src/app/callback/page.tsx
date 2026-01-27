@@ -2,14 +2,24 @@
 
 import { Suspense } from 'react';
 import { useEffect, useState, useRef } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 
+/**
+ * OAuth Callback Page
+ *
+ * This page receives the OAuth callback from the authorization server,
+ * then REDIRECTS the browser to the API to complete the flow.
+ *
+ * Why redirect instead of fetch?
+ * - The API sets an HTTP-only cookie directly on the browser
+ * - No proxy cookie forwarding issues
+ * - Cookie domain can be set to work across subdomains
+ * - Simpler, more reliable, standards-compliant OAuth flow
+ */
 function CallbackContent() {
   const searchParams = useSearchParams();
-  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(true);
   const hasProcessed = useRef(false);
 
   useEffect(() => {
@@ -21,16 +31,15 @@ function CallbackContent() {
     const errorParam = searchParams.get('error');
     const errorDescription = searchParams.get('error_description');
 
+    // Handle OAuth error response
     if (errorParam) {
       hasProcessed.current = true;
       setError(errorDescription || errorParam);
-      setIsProcessing(false);
       return;
     }
 
     // If no code yet, wait - this can happen during initial render
     if (!code) {
-      // Check if we have any params at all - if not, still waiting
       const hasAnyParams = searchParams.toString().length > 0;
       if (!hasAnyParams) {
         // Still waiting for params, don't show error yet
@@ -38,45 +47,36 @@ function CallbackContent() {
       }
       hasProcessed.current = true;
       setError('Missing authorization code');
-      setIsProcessing(false);
       return;
     }
 
     hasProcessed.current = true;
 
-    // Exchange code for token via backend
-    // Backend sets HTTP-only cookie with internal JWT - no sessionStorage needed
-    async function exchangeToken() {
-      try {
-        const response = await fetch('/api/auth/callback', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include', // Include cookies in request/response
-          body: JSON.stringify({ code, state }),
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error?.message || 'Token exchange failed');
-        }
-
-        // Cookie is set by backend - no sessionStorage needed
-        // Just redirect to eligibility page with patient context
-        // API returns 'patientId', not 'patient'
-        const patientId = data.patientId || searchParams.get('patient');
-        router.push(`/eligibility${patientId ? `?patient=${patientId}` : ''}`);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Authentication failed');
-        setIsProcessing(false);
-      }
+    // REDIRECT browser to API to complete OAuth flow
+    // API will:
+    // 1. Exchange code for tokens
+    // 2. Create session
+    // 3. Set HTTP-only cookie DIRECTLY on browser
+    // 4. Redirect back to /eligibility
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (!apiUrl) {
+      setError('Configuration error: API URL not set');
+      return;
     }
 
-    exchangeToken();
-  }, [searchParams, router]);
+    // Build redirect URL with code and state
+    const callbackUrl = new URL(`${apiUrl}/auth/callback`);
+    callbackUrl.searchParams.set('code', code);
+    if (state) {
+      callbackUrl.searchParams.set('state', state);
+    }
 
-  // Show error only after processing is complete and there's an actual error
-  if (!isProcessing && error) {
+    // Redirect browser to API
+    window.location.href = callbackUrl.toString();
+  }, [searchParams]);
+
+  // Show error if OAuth failed
+  if (error) {
     return (
       <main className="min-h-screen flex items-center justify-center p-8">
         <div className="card p-8 max-w-md w-full text-center">
@@ -98,7 +98,7 @@ function CallbackContent() {
     );
   }
 
-  // Always show loading while processing
+  // Show loading while redirecting
   return (
     <main className="min-h-screen flex items-center justify-center p-8">
       <div className="text-center space-y-4">

@@ -155,8 +155,12 @@ export function getSessionCookieOptions(): {
     name: process.env.SESSION_COOKIE_NAME || 'eligibility_session',
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    // SameSite=Lax required for cookie to be sent after OAuth redirect
+    // Strict would block the cookie on the redirect from OAuth server
+    sameSite: 'lax',
     path: '/',
+    // Domain MUST be set to parent domain for cookie to work across subdomains
+    // e.g., ".eligibility.practicefusionpm.com" for both frontend and api subdomains
     domain: domain || undefined,
     maxAge: expiresInSeconds,
   };

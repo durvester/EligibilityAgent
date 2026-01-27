@@ -32,6 +32,11 @@ interface CallbackBody {
   state: string;
 }
 
+interface CallbackQuery {
+  code: string;
+  state: string;
+}
+
 interface SmartConfiguration {
   authorization_endpoint: string;
   token_endpoint: string;
@@ -306,13 +311,142 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   /**
-   * OAuth Callback
+   * OAuth Callback (GET) - Direct browser redirect
    *
-   * 1. Exchange authorization code for tokens
-   * 2. Create or get tenant from issuer
-   * 3. Create session with PF tokens
-   * 4. Set HTTP-only session cookie
-   * 5. Return tenant/user info (NOT tokens)
+   * This is the preferred flow:
+   * 1. Frontend /callback page redirects browser here with code & state
+   * 2. We exchange code for tokens
+   * 3. Set HTTP-only cookie DIRECTLY on browser (no proxy issues)
+   * 4. Redirect to frontend eligibility page
+   *
+   * This avoids all the Next.js Route Handler cookie forwarding issues.
+   */
+  fastify.get<{ Querystring: CallbackQuery }>('/callback', async (request, reply) => {
+    const { code, state } = request.query;
+    const appUrl = getRequiredEnv('NEXT_PUBLIC_APP_URL');
+
+    // Helper to redirect to error page
+    const redirectToError = (code: string, message: string) => {
+      const errorUrl = new URL(`${appUrl}/auth/error`);
+      errorUrl.searchParams.set('code', code);
+      errorUrl.searchParams.set('message', message);
+      return reply.redirect(errorUrl.toString());
+    };
+
+    if (!code || !state) {
+      return redirectToError('INVALID_CALLBACK', 'Missing code or state parameter');
+    }
+
+    // Validate state and get stored launch context
+    const launchState = stateStore.get(state);
+    if (!launchState) {
+      return redirectToError('INVALID_STATE', 'Invalid or expired state. Please try logging in again.');
+    }
+    stateStore.delete(state);
+
+    const redirectUri = `${appUrl}/callback`;
+
+    try {
+      // Exchange code for token
+      const tokenResponse = await axios.post(
+        launchState.tokenUrl,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: redirectUri,
+          client_id: getRequiredEnv('PF_CLIENT_ID'),
+          client_secret: getRequiredEnv('PF_CLIENT_SECRET'),
+        }),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 30000,
+        }
+      );
+
+      const tokenData = tokenResponse.data;
+
+      // Extract fhirUser from id_token
+      const { fhirUser, userName } = tokenData.id_token
+        ? extractFhirUser(tokenData.id_token)
+        : { fhirUser: tokenData.fhirUser, userName: undefined };
+
+      const userFhirId = extractPractitionerReference(fhirUser);
+
+      fastify.log.info({
+        hasAccessToken: !!tokenData.access_token,
+        hasRefreshToken: !!tokenData.refresh_token,
+        patient: tokenData.patient,
+        userFhirId,
+      }, 'Token exchange successful (GET callback)');
+
+      // Get or create tenant from issuer
+      const tenant = await getOrCreateTenant(launchState.iss, tokenData.access_token);
+
+      // Create session
+      const { sessionId, internalJwt } = await createSession({
+        tenantId: tenant.id,
+        userFhirId,
+        userName: userName || null,
+        patientId: tokenData.patient || null,
+        scope: tokenData.scope || null,
+        pfAccessToken: tokenData.access_token,
+        pfRefreshToken: tokenData.refresh_token || null,
+        pfExpiresIn: tokenData.expires_in || 3600,
+      });
+
+      // Audit the login
+      auditLogin(
+        tenant.id,
+        sessionId,
+        userFhirId,
+        userName || null,
+        request.ip,
+        request.headers['user-agent']
+      );
+
+      // Set session cookie DIRECTLY on browser response
+      const cookieOptions = getSessionCookieOptions();
+      reply.setCookie(cookieOptions.name, internalJwt, {
+        httpOnly: cookieOptions.httpOnly,
+        secure: cookieOptions.secure,
+        sameSite: cookieOptions.sameSite,
+        path: cookieOptions.path,
+        domain: cookieOptions.domain,
+        maxAge: cookieOptions.maxAge,
+      });
+
+      fastify.log.info({
+        sessionId,
+        tenantId: tenant.id,
+        cookieDomain: cookieOptions.domain || '(not set)',
+      }, 'Session created, redirecting to app');
+
+      // Redirect to eligibility page with patient context
+      const eligibilityUrl = new URL(`${appUrl}/eligibility`);
+      if (tokenData.patient) {
+        eligibilityUrl.searchParams.set('patient', tokenData.patient);
+      }
+
+      return reply.redirect(eligibilityUrl.toString());
+    } catch (error) {
+      fastify.log.error(error, 'Token exchange failed (GET callback)');
+
+      if (axios.isAxiosError(error) && error.response) {
+        const message = error.response.data?.error_description ||
+          error.response.data?.error ||
+          'Token exchange failed';
+        return redirectToError('TOKEN_EXCHANGE_FAILED', message);
+      }
+
+      return redirectToError('TOKEN_EXCHANGE_FAILED', 'Authentication failed. Please try again.');
+    }
+  });
+
+  /**
+   * OAuth Callback (POST) - Legacy Route Handler proxy
+   *
+   * Kept for backward compatibility with the Next.js Route Handler approach.
+   * The GET handler above is preferred.
    */
   fastify.post<{ Body: CallbackBody }>('/callback', async (request, reply) => {
     const { code, state } = request.body;
