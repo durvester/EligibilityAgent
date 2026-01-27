@@ -109,16 +109,22 @@ A SMART on FHIR app launched from Practice Fusion EHR that:
 ### 3.2 Agent Architecture
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Claude Agent SDK (claude-sonnet-4-20250514 + extended thinking)│
+│  Anthropic SDK (claude-sonnet-4-20250514 via messages API)      │
 ├─────────────────────────────────────────────────────────────────┤
-│  Tools (MCP-style via createSdkMcpServer):                      │
-│  ├── lookup_npi        → NPPES Registry API                     │
+│  Tools (defined as JSON schema):                                │
+│  ├── lookup_npi        → NPPES Registry API (cached in Redis)   │
 │  ├── search_npi        → NPPES search by name                   │
 │  ├── search_payers     → Stedi payer directory                  │
 │  ├── get_payer_mapping → In-memory store (agent's memory)       │
 │  ├── save_payer_mapping → In-memory store                       │
 │  ├── check_eligibility → Stedi X12 270/271 API                  │
 │  └── discover_insurance → Stedi Insurance Discovery (slow)      │
+├─────────────────────────────────────────────────────────────────┤
+│  Agentic Loop (apps/api/src/services/agent/loop.ts):            │
+│  ├── Message → Claude (with tools)                              │
+│  ├── If tool_use → Execute tool → Add tool_result               │
+│  ├── If text → Parse JSON output                                │
+│  └── Repeat until stop_reason = 'end_turn' or max turns         │
 ├─────────────────────────────────────────────────────────────────┤
 │  Critical Rules:                                                │
 │  ├── Discovery → Eligibility: MUST call check_eligibility       │
@@ -130,7 +136,7 @@ A SMART on FHIR app launched from Practice Fusion EHR that:
 │  Stop Conditions:                                               │
 │  ├── Max 20 turns (configurable)                                │
 │  ├── Max 10 Stedi API calls                                     │
-│  ├── Agent completes task                                       │
+│  ├── Agent completes task (stop_reason = 'end_turn')            │
 │  └── Client disconnection                                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Output: SSE stream via @fastify/sse plugin                     │
@@ -286,17 +292,18 @@ interface AgentCompleteEvent {
 
 ## 6. Implementation Status
 
-### 6.1 Completed (Phase 1, 2 & 3)
+### 6.1 Completed (Phases 1-4)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Monorepo setup | ✅ Done | pnpm + Turborepo |
 | Shared types package | ✅ Done | FHIR, eligibility, agent types |
-| Database schema | ✅ Done | Prisma schema, not deployed |
-| SMART OAuth flow | ✅ Done | Tested with Practice Fusion - see 6.3 |
-| FHIR proxy routes | ✅ Done | Patient, Coverage, Practitioner |
-| NPI validation/lookup | ✅ Done | NPPES integration |
-| Claude Agent | ✅ Done | Claude Agent SDK with MCP tools |
+| Database schema | ✅ Done | Tenant, Session, AgentRun, AuditLog |
+| Database deployment | ✅ Done | PostgreSQL on Fly.io |
+| SMART OAuth flow | ✅ Done | Tested with Practice Fusion |
+| FHIR proxy routes | ✅ Done | Patient, Coverage, Practitioner with retry-on-401 |
+| NPI validation/lookup | ✅ Done | NPPES integration with Redis caching |
+| Claude Agent | ✅ Done | Direct Anthropic SDK (messages API) |
 | SSE Streaming | ✅ Done | @fastify/sse plugin, real-time events |
 | Agent observability | ✅ Done | Thinking, tool calls, results in UI |
 | Payer mapping memory | ✅ Done | Simple in-memory store |
@@ -305,25 +312,36 @@ interface AgentCompleteEvent {
 | Insurance discovery | ✅ Done | Stedi Insurance Discovery API |
 | Insurance card parsing | ✅ Done | Claude Vision |
 | Frontend UI shell | ✅ Done | All components created |
-| Token service | ✅ Done | PostgreSQL storage with AES-256-GCM encryption |
-| Token refresh | ✅ Done | Auto-refresh 5 minutes before expiration |
+| Two-token auth | ✅ Done | Internal JWT + encrypted PF tokens |
+| Session management | ✅ Done | Middleware validates JWT, attaches session |
+| Token refresh | ✅ Done | Retry-on-401 pattern with stored tokenEndpoint |
 | Agent structured output | ✅ Done | Summary, discrepancies, raw response |
 | Results tabbed UI | ✅ Done | Summary, Details, Raw JSON tabs |
 | Discrepancy detection | ✅ Done | Agent compares input vs Stedi response |
 | PDF download | ✅ Done | Client-side via browser print |
 | Raw response display | ✅ Done | JSON viewer with copy/expand |
+| HIPAA audit logging | ✅ Done | Fire-and-forget, tenant-scoped |
+| Redis caching | ✅ Done | Upstash Redis (NPI, SMART config) |
+| Rate limiting | ✅ Done | 100/min general, 10/min agent |
+| Environment validation | ✅ Done | Fail-fast at startup |
+| Fly.io deployment | ✅ Done | API + Web with auto-deploy CI/CD |
 
-### 6.2 Pending (Phase 3 & 4)
+### 6.2 Pending (Phases 5-7)
 
-| Component | Status | Priority |
-|-----------|--------|----------|
-| Database deployment | ❌ Pending | High - need PostgreSQL instance |
-| Payer mapping persistence | ❌ Pending | Medium - agent memory lost on restart |
-| Practice Fusion write-back | ❌ Pending | Medium - needs proprietary API docs |
-| Eligibility history UI | ❌ Pending | Low |
-| Audit logging wiring | ❌ Pending | Low - schema ready |
-| Agent evaluations | ❌ Pending | Low |
-| Multi-tenant admin UI | ❌ Pending | Low |
+| Component | Status | Priority | Phase |
+|-----------|--------|----------|-------|
+| Unit tests (Jest) | ❌ Pending | High | 5 |
+| E2E tests (Playwright) | ❌ Pending | High | 5 |
+| ESLint strict mode | ❌ Pending | Medium | 6 |
+| Remove console.log | ❌ Pending | Medium | 6 |
+| Type safety (no any) | ❌ Pending | Medium | 6 |
+| Grafana monitoring | ❌ Pending | Medium | 7 |
+| Fly.io alerting | ❌ Pending | Medium | 7 |
+| Payer mapping persistence | ❌ Pending | Low | Future |
+| Practice Fusion write-back | ❌ Pending | Low | Future |
+| Eligibility history UI | ❌ Pending | Low | Future |
+| Agent evaluations | ❌ Pending | Low | Future |
+| Multi-tenant admin UI | ❌ Pending | Low | Future |
 
 ### 6.3 OAuth Flow - Tested & Working
 
@@ -341,13 +359,20 @@ The SMART on FHIR OAuth flow has been tested with Practice Fusion:
 - Next.js 14 Suspense boundaries added for `useSearchParams` pages
 - Token passing: frontend stores in sessionStorage, passes as headers to FHIR proxy
 
-**Token Storage Architecture:**
+**Token Storage Architecture (Two-Token System):**
 ```
-Frontend (sessionStorage)     →    Backend (PostgreSQL)
-├── smart_access_token             ├── OAuthToken table
-├── smart_fhir_base_url            ├── AES-256-GCM encryption
-└── smart_refresh_token            └── Auto-refresh before expiration
+Browser                        Backend (PostgreSQL)
+├── HttpOnly cookie            ├── Session table
+│   └── Internal JWT           │   ├── internalJwtId (lookup)
+│       (15 min, for API auth) │   ├── pfAccessToken (encrypted)
+│                              │   ├── pfRefreshToken (encrypted)
+└── credentials: 'include'     │   └── tokenEndpoint (for refresh)
+    (all fetch calls)          └── Retry-on-401 for FHIR calls
 ```
+- Frontend stores NOTHING (no sessionStorage, no localStorage)
+- Internal JWT validated by session middleware
+- PF tokens ONLY used for FHIR API calls (never sent to frontend)
+- Token refresh triggered on 401 from FHIR server
 
 ### 6.4 Practice Fusion FHIR Data Mapping - CRITICAL
 
@@ -503,21 +528,29 @@ The `EligibilityResults.tsx` component displays agent output in a tabbed interfa
 ## 8. Security Considerations
 
 ### 8.1 Authentication
-- SMART on FHIR OAuth 2.0 with PKCE (if supported)
-- State parameter for CSRF protection
-- Short-lived access tokens with refresh
+- **Two-token system**: Internal JWT for API auth, PF tokens for FHIR
+- SMART on FHIR OAuth 2.0 with state parameter for CSRF protection
+- Internal JWT: Short-lived (15 min), stored in HttpOnly cookie
+- PF tokens: Encrypted in database, auto-refreshed on 401
 
 ### 8.2 Data Protection
-- Tokens encrypted at rest with AES-256-GCM (implemented)
+- Tokens encrypted at rest with AES-256-GCM
 - Encryption key from `ENCRYPTION_KEY` env var
+- JWT signing key from `JWT_SECRET` env var
 - Key derivation using scrypt with per-encryption salt
-- No PHI in logs (sanitized)
-- HTTPS everywhere
+- HTTPS everywhere (enforced in production)
+- HSTS header in production responses
 
-### 8.3 HIPAA Compliance
-- Audit logging schema ready
+### 8.3 Rate Limiting
+- 100 requests/minute per IP (general endpoints)
+- 10 requests/minute per IP (agent endpoints - expensive AI calls)
+- Health check endpoint exempt
+
+### 8.4 HIPAA Compliance
+- Audit logging implemented (fire-and-forget)
+- All PHI access logged: tenantId, sessionId, userFhirId, action, resourceId
 - Minimum necessary data access
-- Session timeout (TODO)
+- Tenant-scoped data isolation
 
 ---
 
@@ -532,12 +565,14 @@ The `EligibilityResults.tsx` component displays agent output in a tabbed interfa
 | `PF_CLIENT_ID` | Yes | Practice Fusion OAuth client ID |
 | `PF_CLIENT_SECRET` | Yes | Practice Fusion OAuth client secret |
 | `PF_SCOPES` | Yes | OAuth scopes (use `launch` not `launch/patient`) |
-| `DATABASE_URL` | For DB | PostgreSQL connection string |
-| `ENCRYPTION_KEY` | For DB | Token encryption key (generate: `openssl rand -base64 32`) |
-| `DEFAULT_TENANT_ID` | For DB | Default tenant ID for single-tenant deployments |
-| `NPI_REGISTRY_URL` | No | Defaults to CMS NPPES |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `ENCRYPTION_KEY` | Yes | Token encryption key (generate: `openssl rand -base64 32`) |
+| `JWT_SECRET` | Yes | Internal JWT signing key (generate: `openssl rand -base64 64`) |
+| `UPSTASH_REDIS_URL` | Yes | Upstash Redis REST URL |
+| `UPSTASH_REDIS_TOKEN` | Yes | Upstash Redis token |
 | `NEXT_PUBLIC_APP_URL` | Yes | Frontend URL for redirects |
-| `API_URL` | Yes | Backend URL |
+| `NEXT_PUBLIC_API_URL` | Yes | Backend URL for SSE |
+| `CORS_ORIGIN` | No | Allowed CORS origin (empty = env default) |
 | `NODE_ENV` | No | development/production |
 
 ### 9.2 Agent Configuration
@@ -612,28 +647,37 @@ EligibilityAgent/
 │   │
 │   └── api/                          # Fastify Backend
 │       ├── src/
-│       │   ├── index.ts              # Server entry
+│       │   ├── index.ts              # Server entry with middleware
 │       │   ├── routes/
-│       │   │   ├── auth.ts           # SMART OAuth
-│       │   │   ├── fhir.ts           # FHIR proxy
-│       │   │   ├── npi.ts            # NPI lookup
+│       │   │   ├── auth.ts           # SMART OAuth (creates session)
+│       │   │   ├── fhir.ts           # FHIR proxy with retry-on-401
+│       │   │   ├── npi.ts            # NPI lookup (public)
 │       │   │   ├── agent.ts          # SSE endpoint for agent
+│       │   │   ├── health.ts         # Health check (DB + Redis)
+│       │   │   ├── history.ts        # Agent run history
 │       │   │   ├── eligibility.ts    # Save/history
 │       │   │   └── card-parse.ts     # Card OCR
+│       │   ├── middleware/
+│       │   │   └── session.ts        # JWT validation, session attach
 │       │   ├── services/
 │       │   │   ├── agent/
-│       │   │   │   ├── loop.ts       # Agent loop with SDK
+│       │   │   │   ├── loop.ts       # Agent loop (Anthropic SDK)
 │       │   │   │   ├── tools.ts      # Tool type definitions
 │       │   │   │   ├── executor.ts   # Tool execution dispatch
 │       │   │   │   └── prompt.ts     # System prompt
+│       │   │   ├── session-service.ts # Session management, JWT issuance
+│       │   │   ├── audit-service.ts  # HIPAA audit logging
 │       │   │   ├── stedi.ts          # Stedi eligibility client
 │       │   │   ├── payer-search.ts   # Stedi payer directory
 │       │   │   ├── insurance-discovery.ts # Stedi discovery
-│       │   │   ├── npi.ts            # NPPES client
-│       │   │   ├── payer-mapping.ts  # Memory store
-│       │   │   └── token-service.ts  # PostgreSQL token storage
+│       │   │   ├── npi.ts            # NPPES client (Redis cached)
+│       │   │   └── payer-mapping.ts  # Memory store
 │       │   └── lib/
-│       │       └── encryption.ts     # AES-256-GCM encryption
+│       │       ├── encryption.ts     # AES-256-GCM encryption
+│       │       ├── cache.ts          # Upstash Redis caching
+│       │       ├── logger.ts         # Structured logging
+│       │       └── validate-env.ts   # Startup env validation
+│       ├── __tests__/                # Jest unit tests
 │       └── package.json
 │
 ├── packages/
@@ -801,52 +845,52 @@ See `CODE_AUDIT.md` for full audit report.
 
 ### 16.1 Summary
 
-| Category | Status | Critical Issues |
-|----------|--------|-----------------|
-| Test Coverage | **CRITICAL** | Zero automated tests |
-| Code Quality | **MEDIUM** | 25+ console.log statements |
-| Performance | **HIGH** | Blocking crypto, no caching |
-| Security/Privacy | **CRITICAL** | PHI logging, no rate limiting |
-| Logging/Monitoring | **CRITICAL** | No monitoring infrastructure |
+| Category | Status | Notes |
+|----------|--------|-------|
+| Test Coverage | **MEDIUM** | Jest configured, basic tests added |
+| Code Quality | **MEDIUM** | Some console.log statements remain |
+| Performance | **OK** | Redis caching implemented |
+| Security/Privacy | **OK** | Auth, rate limiting, audit logging done |
+| Logging/Monitoring | **MEDIUM** | Structured logging, monitoring pending |
 | Dependencies | **LOW** | 2 unused packages |
 
-### 16.2 Security Issues
+### 16.2 Resolved Security Issues (Phases 1-4)
 
-**CRITICAL - Must Fix Before Production:**
+| Issue | Status | Resolution |
+|-------|--------|------------|
+| No authorization on agent endpoint | ✅ Fixed | Session middleware on protected routes |
+| No rate limiting | ✅ Fixed | @fastify/rate-limit (100/min, 10/min for agent) |
+| AuditLog never populated | ✅ Fixed | Fire-and-forget audit logging |
+| NPI lookups not cached | ✅ Fixed | Upstash Redis caching |
 
-| Issue | Risk | Location |
-|-------|------|----------|
-| PHI logged to stdout | HIPAA violation | `services/stedi.ts:212,227`, `services/agent/executor.ts:28` |
-| No authorization on agent endpoint | Unauthenticated access to PHI | `routes/agent.ts:90` |
-| No rate limiting | DoS, cost abuse | All endpoints |
-| AuditLog never populated | HIPAA compliance | `prisma/schema.prisma` (table unused) |
-| JWT ID token not verified | User impersonation | `routes/auth.ts:250-280` |
+### 16.3 Remaining Issues
 
-### 16.3 Performance Issues
-
-| Issue | Impact | Fix |
-|-------|--------|-----|
-| `scryptSync` blocks event loop | Request latency under load | Move to worker thread |
-| Missing database indexes | Slow token lookups | Add `@@index([tenantId, patientId])` |
-| Payer mappings lost on restart | Re-discovery costs | Persist to PostgreSQL |
-| NPI lookups not cached | Repeated API calls | Add LRU cache |
+| Issue | Impact | Phase |
+|-------|--------|-------|
+| Console.log statements | Code quality | Phase 6 |
+| ESLint strict mode | Code quality | Phase 6 |
+| Type safety (any types) | Code quality | Phase 6 |
+| Monitoring infrastructure | Operations | Phase 7 |
+| Payer mappings lost on restart | Agent memory | Future |
 
 ### 16.4 Test Coverage
 
-**Current:** 0% - No test framework configured
+**Current:** Basic test framework configured
+- Jest configured for ESM
+- `apps/api/src/__tests__/routes/fhir-retry.test.ts` - Token retry tests
 
-**Required:**
+**Required (Phase 5):**
 - Unit tests for encryption, NPI validation, Stedi parsing
 - Integration tests for agent loop, OAuth flow
-- E2E tests for eligibility check workflow
+- E2E tests (Playwright) for eligibility check workflow
 
 ### 16.5 Dependencies
 
-**Unused (remove):**
+**Unused (consider removing):**
 - `pdfkit` (0.16.0) - Leftover code
 - `@types/pdfkit` (0.13.9)
 
-**Missing:**
-- Test framework (jest/vitest)
-- Rate limiting (`@fastify/rate-limit`)
-- Log aggregation (Grafana/DataDog integration)
+**Installed:**
+- Jest test framework configured
+- @fastify/rate-limit for rate limiting
+- @upstash/redis for caching

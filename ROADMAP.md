@@ -1,15 +1,29 @@
 # Eligibility Agent Roadmap
 
-## Current State Assessment
+## Current State (January 2026)
+
+### Completed Phases (1-4)
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| 1 | Database Schema & Foundation Services | ✅ Complete |
+| 2 | Internal JWT & Cookie Auth | ✅ Complete |
+| 3 | Audit Logging & Agent Output Storage | ✅ Complete |
+| 4 | Redis Caching & Rate Limiting | ✅ Complete |
 
 ### What's Working
-- **Token Management**: AES-256-GCM encrypted storage in PostgreSQL with auto-refresh 5 minutes before expiration
-- **FHIR Integration**: Patient, Coverage, Practitioner data extraction from Practice Fusion
-- **Agent Tool Execution**: NPI lookup, payer search, eligibility checks via Stedi
-- **Basic SSE Streaming**: Events flow from agent to UI
+- **Tenant-centric architecture**: Issuer (FHIR base URL) = Practice = Tenant
+- **Two-token authentication**: Internal JWT (cookie) + PF tokens (encrypted in DB)
+- **Session management**: Middleware validates JWT, attaches session to request
+- **Token refresh**: Retry-on-401 pattern with stored tokenEndpoint
+- **FHIR Integration**: Patient, Coverage, Practitioner with retry-on-401
+- **Agent Tool Execution**: NPI lookup (Redis cached), payer search, eligibility checks
+- **HIPAA Audit Logging**: Fire-and-forget, tenant-scoped
+- **Rate Limiting**: 100/min general, 10/min for agent endpoints
+- **SSE Streaming**: Events flow from agent to UI in real-time
 - **Deployment**: Fly.io with GitHub Actions auto-deploy
 
-### Critical Issues Identified
+### Remaining Issues (Agent UX)
 
 | Issue | Severity | Impact |
 |-------|----------|--------|
@@ -194,26 +208,107 @@ interface SourceAttribution {
 
 ---
 
-## Priority & Timeline
+---
 
-### Phase 1: Critical Fixes (Sprint 1)
+## Infrastructure Phases (Remaining)
+
+### Phase 5: Testing & Playwright E2E
+
+**Goal**: Establish comprehensive test coverage for CI/CD confidence.
+
+#### Story 5.1: Unit Tests (Jest)
+- JWT sign/verify, expiration, invalid signature
+- Session CRUD, JWT issuance, refresh
+- Fire-and-forget audit behavior
+- X12 271 parsing, benefit extraction
+- OAuth callback, tenant creation, cookie setting
+
+#### Story 5.2: Integration Tests
+- Agent loop with mock Anthropic responses
+- FHIR proxy with retry-on-401
+- Session middleware validation
+
+#### Story 5.3: E2E Tests (Playwright)
+- OAuth flow end-to-end
+- Eligibility check workflow
+- SSE streaming verification
+
+#### Story 5.4: CI Pipeline Updates
+- Run unit tests on every PR
+- Run E2E tests before deploy
+- Block deploys on test failures
+
+---
+
+### Phase 6: Code Quality & Type Safety
+
+**Goal**: Clean up code quality issues for maintainability.
+
+#### Story 6.1: Remove Console.log
+- Replace all console.log with Fastify logger
+- Frontend: Remove debug logs or use proper error boundaries
+
+#### Story 6.2: ESLint Strict Mode
+- Enable `no-console: error`
+- Enable `@typescript-eslint/no-explicit-any: error`
+- Add to CI pipeline (block on warnings)
+
+#### Story 6.3: Type Safety
+- Create `StediEligibilityResponse` interface from API schema
+- Type all FHIR extensions properly
+- Remove all `any` types from codebase
+
+#### Story 6.4: Remove Hardcoded Fallbacks
+- Fail explicitly if config missing (no localhost fallbacks)
+- Validate all required env vars at startup
+
+---
+
+### Phase 7: Monitoring, Alerting & Fly.io Integration
+
+**Goal**: Production observability and proactive alerting.
+
+#### Story 7.1: Health Check Enhancement
+- Return DB + Redis status with latency
+- Return 503 if any dependency unhealthy
+- Add version/commit info to health response
+
+#### Story 7.2: Log Drain to Grafana
+- Configure Fly.io log shipping to Grafana Cloud
+- Set up log aggregation dashboards
+
+#### Story 7.3: Fly.io Metrics
+- Enable Prometheus endpoint
+- Configure key metrics (request latency, error rate)
+
+#### Story 7.4: Alerting
+- Error rate > 5% over 5 minutes
+- p99 latency > 10 seconds
+- Machine restarts
+- Health check failures
+
+---
+
+## Agent UX Phases (Future)
+
+### Agent Phase 1: Critical Fixes
 1. Story 3.1: Enable Extended Thinking
 2. Story 4.1: Structured Source Attribution
 3. Story 5.2: Tool Use ID Tracking
 4. Story 5.4: Auto-Scroll Trace Panel
 
-### Phase 2: State Machine (Sprint 2)
+### Agent Phase 2: State Machine
 1. Story 1.1: Define Agent States
 2. Story 1.2: Structured Output Schema
 3. Story 1.3: Update System Prompt
 4. Story 5.1: Agent Journey Progress
 
-### Phase 3: Multi-Turn Selection (Sprint 3)
+### Agent Phase 3: Multi-Turn Selection
 1. Story 2.1: Multiple NPI Resolution
 2. Story 2.2: Multiple Insurance Plans
 3. Story 2.3: Payer Ambiguity Resolution
 
-### Phase 4: Polish (Sprint 4)
+### Agent Phase 4: Polish
 1. Story 5.3: Summary Preview
 2. Story 6.1: Retry Mechanisms
 3. Story 6.2: Partial Results
@@ -223,7 +318,15 @@ interface SourceAttribution {
 
 ## Technical Debt
 
+### Resolved (Phases 1-4)
+- ~~No route authorization~~ → Session middleware
+- ~~No rate limiting~~ → @fastify/rate-limit
+- ~~No audit trail~~ → Fire-and-forget logging
+- ~~Missing env validation~~ → validateEnvironmentOrExit()
+- ~~NPI lookups not cached~~ → Upstash Redis
+
+### Remaining
 - Remove `@anthropic-ai/claude-agent-sdk` dependency (no longer used)
-- Add DEFAULT_TENANT_ID setup for database foreign key constraint
-- Add scheduled cleanup for expired tokens
+- Remove `pdfkit` dependency (unused)
+- Add scheduled cleanup for expired tokens/sessions
 - Persist payer mappings to database (schema ready, service not implemented)

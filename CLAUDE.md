@@ -40,10 +40,10 @@ CODE_AUDIT.md         # Security, performance, quality audit
 1. EHR launches app with `iss` (FHIR base URL) and `launch` token
 2. Backend discovers OAuth endpoints from `{iss}/.well-known/smart-configuration`
 3. User authorizes, callback exchanges code for token
-4. Token response includes `fhirBaseUrl` for subsequent FHIR calls
-5. Frontend stores token in sessionStorage, passes headers on all API calls
-6. Backend stores encrypted tokens in PostgreSQL (when `DATABASE_URL` configured)
-7. Token refresh happens automatically 5 minutes before expiration
+4. Backend creates/updates tenant (issuer = tenant identifier)
+5. Backend creates session with encrypted PF tokens, issues internal JWT
+6. Internal JWT stored in HttpOnly cookie (frontend stores NOTHING)
+7. Token refresh happens on-demand via retry-on-401 pattern
 
 **Practice Fusion Specifics:**
 - Use `launch` scope, NOT `launch/patient`
@@ -101,10 +101,15 @@ const practitionerId = match?.[1]; // "627b9ead-07b0-4ce3-9a15-474993cfbaa7"
 - No hardcoded payer mappings
 - Future: persist to `payer_mappings` table in PostgreSQL
 
-### Token Storage
-- **Frontend**: sessionStorage for immediate access after OAuth callback
-- **Backend**: PostgreSQL with AES-256-GCM encryption (when `DATABASE_URL` configured)
-- **Refresh**: Auto-refresh 5 minutes before expiration using refresh token
+### Authentication Architecture (Two-Token System)
+- **Internal JWT**: Short-lived (15 min), stored in HttpOnly cookie, used for API auth
+  - Contains: sessionId, tenantId, userFhirId, userName, jti
+  - Validated by session middleware on protected routes
+- **PF OAuth Tokens**: Encrypted with AES-256-GCM, stored in PostgreSQL Session table
+  - ONLY used for FHIR API calls (never sent to frontend)
+  - Refreshed on-demand when FHIR returns 401
+  - `tokenEndpoint` stored for refresh requests
+- **Frontend**: Stores NOTHING - all auth via cookies with `credentials: 'include'`
 - **Encryption key**: Set `ENCRYPTION_KEY` env var (generate: `openssl rand -base64 32`)
 
 ### Streaming Responses
@@ -121,7 +126,12 @@ const practitionerId = match?.[1]; // "627b9ead-07b0-4ce3-9a15-474993cfbaa7"
 |------|---------|
 | `apps/api/src/routes/auth.ts` | SMART OAuth with dynamic discovery |
 | `apps/api/src/routes/agent.ts` | SSE endpoint for eligibility agent |
-| `apps/api/src/routes/fhir.ts` | FHIR proxy (requires headers) |
+| `apps/api/src/routes/fhir.ts` | FHIR proxy with retry-on-401 |
+| `apps/api/src/routes/health.ts` | Health check endpoint (DB + Redis status) |
+| `apps/api/src/routes/history.ts` | Agent run history API |
+| `apps/api/src/middleware/session.ts` | JWT validation and session attachment |
+| `apps/api/src/services/session-service.ts` | Session management, JWT issuance, token refresh |
+| `apps/api/src/services/audit-service.ts` | HIPAA audit logging (fire-and-forget) |
 | `apps/api/src/services/agent/loop.ts` | Agent loop using direct Anthropic SDK |
 | `apps/api/src/services/agent/tools.ts` | Tool definitions (JSON schema) |
 | `apps/api/src/services/agent/executor.ts` | Tool execution dispatch |
@@ -129,14 +139,16 @@ const practitionerId = match?.[1]; // "627b9ead-07b0-4ce3-9a15-474993cfbaa7"
 | `apps/api/src/services/stedi.ts` | Stedi X12 270/271 client |
 | `apps/api/src/services/payer-mapping.ts` | Agent memory store (in-memory) |
 | `apps/api/src/services/payer-search.ts` | Stedi payer directory search |
-| `apps/api/src/services/token-service.ts` | PostgreSQL token storage with refresh |
 | `apps/api/src/lib/encryption.ts` | AES-256-GCM token encryption |
+| `apps/api/src/lib/cache.ts` | Upstash Redis caching |
+| `apps/api/src/lib/validate-env.ts` | Startup environment validation |
+| `apps/api/src/lib/logger.ts` | Structured logging |
 | `apps/web/src/app/eligibility/page.tsx` | Main eligibility UI with SSE client |
 | `apps/web/src/lib/sse-client.ts` | Robust SSE parser for fetch-based streams |
 | `apps/web/src/app/eligibility/components/AgentTracePanel.tsx` | Real-time agent activity display (blue theme) |
 | `apps/web/src/app/eligibility/components/EligibilityResults.tsx` | Tabbed results UI (Summary, Details, Raw JSON) |
 | `packages/shared/src/types/index.ts` | All TypeScript types (includes Discrepancy, DiscrepancyReport) |
-| `packages/db/prisma/schema.prisma` | Database schema |
+| `packages/db/prisma/schema.prisma` | Database schema (Tenant, Session, AgentRun, AuditLog) |
 
 ---
 
@@ -205,12 +217,13 @@ data: {"type":"complete","eligibilityResult":{...},"summary":"# Eligibility Summ
 | `PF_CLIENT_ID` | Yes | Practice Fusion OAuth |
 | `PF_CLIENT_SECRET` | Yes | Practice Fusion OAuth |
 | `PF_SCOPES` | Yes | OAuth scopes (use `launch` not `launch/patient`) |
-| `DATABASE_URL` | For DB | PostgreSQL connection string |
-| `ENCRYPTION_KEY` | For DB | Token encryption (generate: `openssl rand -base64 32`) |
-| `DEFAULT_TENANT_ID` | For DB | Default tenant ID for single-tenant mode |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `ENCRYPTION_KEY` | Yes | Token encryption (generate: `openssl rand -base64 32`) |
+| `JWT_SECRET` | Yes | Internal JWT signing (generate: `openssl rand -base64 64`) |
+| `UPSTASH_REDIS_URL` | Yes | Upstash Redis REST URL |
+| `UPSTASH_REDIS_TOKEN` | Yes | Upstash Redis token |
 | `NEXT_PUBLIC_APP_URL` | Yes | Frontend URL |
-| `NEXT_PUBLIC_API_URL` | Yes | Backend URL for SSE (bypasses Next.js proxy) |
-| `API_URL` | Yes | Backend URL (server-side) |
+| `NEXT_PUBLIC_API_URL` | Yes | Backend URL for SSE |
 | `CORS_ORIGIN` | No | Allowed CORS origin (empty = env default) |
 
 ---
@@ -242,41 +255,52 @@ See `SPECIFICATION.md` Section 6.2 for implementation status.
 
 See `CODE_AUDIT.md` for full audit report covering security, performance, and quality.
 
-### Critical Issues (Must Fix Before Production PHI)
+### Resolved Issues (Phases 1-4)
 
-| Issue | Category | Location |
+| Issue | Status | Resolution |
+|-------|--------|------------|
+| No route authorization | ✅ Fixed | Session middleware on protected routes |
+| No rate limiting | ✅ Fixed | @fastify/rate-limit (100/min, 10/min for agent) |
+| No audit trail | ✅ Fixed | Fire-and-forget audit logging |
+| Missing env validation | ✅ Fixed | validateEnvironmentOrExit() at startup |
+
+### Remaining Issues
+
+| Issue | Category | Priority |
 |-------|----------|----------|
-| PHI logged to stdout | Security | `services/stedi.ts`, `services/agent/executor.ts` |
-| No route authorization | Security | `routes/agent.ts`, `routes/eligibility.ts` |
-| Zero automated tests | Quality | Entire codebase |
-| No rate limiting | Security | All API endpoints |
-| Blocking crypto | Performance | `lib/encryption.ts` |
-| No audit trail | Compliance | `AuditLog` table unused |
-
-### Key Findings
-
-- **Test Coverage**: 0% - No test framework configured
-- **Console.log statements**: 25+ should be replaced with Fastify logger
-- **Security**: PHI (names, DOBs, member IDs) logged; missing authorization on agent endpoint
-- **Performance**: Synchronous scrypt blocks event loop; missing database indexes
-- **Dependencies**: `pdfkit` unused; missing env validation at startup
+| Test coverage | Quality | Phase 5 |
+| Console.log statements | Quality | Phase 6 |
+| ESLint strict mode | Quality | Phase 6 |
+| Monitoring/alerting | Operations | Phase 7 |
 
 ### Before Accepting PRs
 
 1. Run `pnpm build` - must pass
-2. No new `console.log` statements (use `fastify.log`)
-3. No PHI in logs (mask or omit sensitive data)
-4. Add tests for new functionality
+2. Run `pnpm test` - tests must pass
+3. No new `console.log` statements (use `fastify.log`)
+4. No PHI in logs (mask or omit sensitive data)
+5. Add tests for new functionality
 
 ## What's Done
 
+### Infrastructure (Phases 1-4 Complete)
 - **Deployment**: Fly.io with auto-deploy via GitHub Actions
 - **Custom domains**: eligibility.practicefusionpm.com + api subdomain with SSL
+- **Tenant-centric architecture**: Issuer = Practice = Tenant
+- **Two-token auth**: Internal JWT (cookie) + PF tokens (encrypted in DB)
+- **Session management**: Middleware validates JWT, attaches session to request
+- **Token refresh**: Retry-on-401 pattern with stored tokenEndpoint
+- **HIPAA audit logging**: Fire-and-forget, all PHI access logged
+- **Redis caching**: Upstash Redis for NPI lookups and SMART config
+- **Rate limiting**: 100/min general, 10/min for agent endpoints
+- **Environment validation**: Fail-fast at startup if config missing
+
+### Agent & UI
 - **Agent rewrite**: Direct Anthropic SDK (removed Claude Agent SDK dependency)
-- PDF download: Client-side via browser print (no server-side PDF generation needed)
-- Agent summary generation: Agent creates markdown summary with source attribution
-- Discrepancy detection: Agent compares input vs Stedi response and flags mismatches
-- Raw response display: Full Stedi X12 271 JSON visible in UI
+- **PDF download**: Client-side via browser print (no server-side PDF generation needed)
+- **Agent summary generation**: Agent creates markdown summary with source attribution
+- **Discrepancy detection**: Agent compares input vs Stedi response and flags mismatches
+- **Raw response display**: Full Stedi X12 271 JSON visible in UI
 
 ## Recent Progress (Jan 2026)
 
@@ -451,3 +475,48 @@ See `CODE_AUDIT.md` for full audit report covering security, performance, and qu
    - 6 epics covering state machine, multi-turn, thinking, attribution, UX, errors
    - 4-phase timeline with prioritized stories
    - Technical debt tracking
+
+### Session 6: Architecture Overhaul - Phases 1-4 (Jan 2026)
+
+1. **Tenant-Centric Architecture**:
+   - Issuer (FHIR base URL) = Practice = Tenant
+   - All resources scoped to tenant
+   - Tenant created on first OAuth callback with that issuer
+
+2. **Two-Token Authentication**:
+   - **Internal JWT**: Short-lived (15 min), stored in HttpOnly cookie, used for API auth
+   - **PF OAuth Tokens**: Encrypted in PostgreSQL, ONLY for FHIR calls
+   - Frontend stores NOTHING - all auth via cookies with `credentials: 'include'`
+
+3. **Session Management**:
+   - Session table links internal JWT to tenant, user, and encrypted PF tokens
+   - `internalJwtId` field for JWT lookup and revocation
+   - Session middleware validates JWT and attaches session to request
+
+4. **Retry-on-401 Token Refresh**:
+   - Simplified from proactive refresh to reactive pattern
+   - `tokenEndpoint` stored during OAuth callback
+   - On FHIR 401: refresh token using stored endpoint, retry once
+   - `fhirRequestWithRetry()` wrapper handles this transparently
+   - Tests added in `apps/api/src/__tests__/routes/fhir-retry.test.ts`
+
+5. **HIPAA Audit Logging**:
+   - Fire-and-forget pattern (never blocks requests)
+   - `auditViewPatient()` and `auditViewCoverage()` helpers
+   - Logs: tenantId, sessionId, userFhirId, action, resourceId, IP, user-agent
+
+6. **Redis Caching** (Upstash):
+   - Required - no fallback to local cache
+   - NPI lookups cached for 1 hour
+   - SMART configuration cached for 1 hour
+   - Environment variables: `UPSTASH_REDIS_URL`, `UPSTASH_REDIS_TOKEN`
+
+7. **Rate Limiting**:
+   - 100 requests/minute per IP for most endpoints
+   - 10 requests/minute for agent endpoints (expensive AI calls)
+   - Health check endpoint exempt
+
+8. **Environment Validation**:
+   - `validateEnvironmentOrExit()` called at startup
+   - All required env vars validated before server starts
+   - Fails fast with clear error messages
