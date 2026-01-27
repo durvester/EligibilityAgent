@@ -32,16 +32,29 @@ interface ToolStepProps {
 interface ThinkingStepProps {
   thinking: string;
   isStreaming?: boolean;
+  isLatest?: boolean;
 }
 
-function ThinkingStep({ thinking, isStreaming }: ThinkingStepProps) {
-  const [expanded, setExpanded] = useState(false);
+function formatCharCount(count: number): string {
+  if (count < 1000) return `${count}`;
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  return `${Math.round(count / 1000)}k`;
+}
+
+function ThinkingStep({ thinking, isStreaming, isLatest }: ThinkingStepProps) {
+  // Auto-expand if it's the latest thinking block
+  const [expanded, setExpanded] = useState(isLatest || false);
 
   // Show preview (first ~100 chars)
   const preview = thinking.length > 100 ? thinking.slice(0, 100) + '...' : thinking;
+  const charCount = thinking.length;
 
   return (
-    <div className="border border-primary-200 bg-primary-50 rounded-lg overflow-hidden">
+    <div className={`rounded-lg overflow-hidden ${
+      isStreaming
+        ? 'border-2 border-dashed border-primary-300 bg-primary-50/70'
+        : 'border border-primary-200 bg-primary-50'
+    }`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 p-2 hover:bg-primary-100 transition-colors text-left"
@@ -53,7 +66,11 @@ function ThinkingStep({ thinking, isStreaming }: ThinkingStepProps) {
         )}
         <Brain className="w-4 h-4 text-primary-500 flex-shrink-0" />
         <span className="text-sm font-medium text-primary-700 flex-grow">
-          Reasoning
+          {isStreaming ? 'Analyzing...' : 'Analysis'}
+        </span>
+        {/* Character count badge */}
+        <span className="text-xs text-primary-500 bg-primary-100 px-1.5 py-0.5 rounded font-mono">
+          {formatCharCount(charCount)} chars
         </span>
         {isStreaming && (
           <Loader2 className="w-4 h-4 animate-spin text-primary-400 flex-shrink-0" />
@@ -143,11 +160,12 @@ function ToolStep({ step, endStep }: ToolStepProps) {
 
       {expanded && (
         <div className="border-t border-neutral-200 p-2 bg-neutral-50 space-y-2">
-          {step.input != null && (
+          {/* Prefer input from endStep (streaming completes there) over step.input */}
+          {(endStep?.input ?? step.input) != null && Object.keys(endStep?.input ?? step.input ?? {}).length > 0 && (
             <div>
               <p className="text-xs font-medium text-neutral-500 mb-1">Input</p>
               <pre className="text-xs bg-white p-2 rounded border border-neutral-200 overflow-x-auto max-h-32">
-                {JSON.stringify(step.input, null, 2)}
+                {JSON.stringify(endStep?.input ?? step.input, null, 2)}
               </pre>
             </div>
           )}
@@ -241,15 +259,23 @@ export default function AgentTracePanel({
     return null;
   }
 
+  // Find the index of the last thinking item (for isLatest prop)
+  const lastThinkingIndex = orderedItems.reduce((lastIdx, item, idx) =>
+    item.type === 'thinking' ? idx : lastIdx, -1
+  );
+
   const panelContent = (
     <>
       {/* Render ordered items */}
       {orderedItems.map((item, i) => {
         if (item.type === 'thinking') {
+          // Mark as latest if it's the last thinking item AND there's no streaming thinking
+          const isLatest = i === lastThinkingIndex && !streamingThinking;
           return (
             <ThinkingStep
               key={item.step.id || i}
               thinking={item.step.thinking || ''}
+              isLatest={isLatest}
             />
           );
         }
@@ -268,9 +294,9 @@ export default function AgentTracePanel({
         return null;
       })}
 
-      {/* Streaming thinking */}
+      {/* Streaming thinking - always the latest when present */}
       {streamingThinking && (
-        <ThinkingStep thinking={streamingThinking} isStreaming />
+        <ThinkingStep thinking={streamingThinking} isStreaming isLatest />
       )}
 
       {/* Streaming text */}

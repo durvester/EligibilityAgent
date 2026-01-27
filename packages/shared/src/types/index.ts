@@ -173,6 +173,7 @@ export interface EligibilityResponse {
   rawResponse?: unknown;
   errors?: string[];
   warnings?: string[];
+  sourceAttribution?: SourceAttribution;
 }
 
 export interface BenefitInfo {
@@ -365,4 +366,14 @@ export interface PayerMapping {
   stediPayerName: string;
   createdAt: Date;
   usageCount: number;
+}
+
+// Source Attribution Types
+export interface SourceAttribution {
+  payer: string;         // Display name of the payer (e.g., "Aetna PPO")
+  payerId: string;       // Stedi payer ID used
+  timestamp: string;     // ISO 8601 timestamp of when the check was performed
+  transactionId?: string; // Transaction ID from Stedi response (if available)
+  responseFormat: 'X12_271'; // Format of the response
+  stediRequestId?: string;   // Stedi request ID for debugging
 }

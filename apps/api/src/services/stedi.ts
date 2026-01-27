@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { EligibilityResponse } from '@eligibility-agent/shared';
+import type { EligibilityResponse, SourceAttribution } from '@eligibility-agent/shared';
 import { serviceLogger } from '../lib/logger.js';
 
 const STEDI_API_URL = process.env.STEDI_API_URL || 'https://healthcare.us.stedi.com/2024-04-01';
@@ -50,14 +50,30 @@ interface StediEligibilityRequest {
 
 /**
  * Parse Stedi X12 271 response into our standard format
+ * Exported for testing
  */
-function parseStediResponse(response: any): EligibilityResponse {
+export function parseStediResponse(
+  response: any,
+  sourceInfo: { payerId: string; payerName?: string; requestId?: string }
+): EligibilityResponse {
+  // Build source attribution
+  const sourceAttribution: SourceAttribution = {
+    payer: sourceInfo.payerName || sourceInfo.payerId,
+    payerId: sourceInfo.payerId,
+    timestamp: new Date().toISOString(),
+    responseFormat: 'X12_271',
+    // Extract transaction ID from response if available
+    transactionId: response?.controlNumber || response?.transactionId,
+    stediRequestId: sourceInfo.requestId,
+  };
+
   const result: EligibilityResponse = {
     status: 'unknown',
     benefits: [],
     errors: [],
     warnings: [],
     rawResponse: response,
+    sourceAttribution,
   };
 
   try {
@@ -229,12 +245,19 @@ export async function checkEligibilityWithStedi(params: EligibilityParams): Prom
       }
     );
 
+    // Extract Stedi request ID from response headers if available
+    const stediRequestId = response.headers['x-request-id'] || response.headers['x-stedi-request-id'];
+
     serviceLogger.info({
       status: response.status,
       hasData: !!response.data,
+      stediRequestId,
     }, 'Stedi eligibility response received');
 
-    return parseStediResponse(response.data);
+    return parseStediResponse(response.data, {
+      payerId: params.stediPayerId,
+      requestId: stediRequestId,
+    });
   } catch (error) {
     serviceLogger.error({
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -252,6 +275,12 @@ export async function checkEligibilityWithStedi(params: EligibilityParams): Prom
         benefits: [],
         errors: [errorData?.message || errorData?.error || `Stedi API error: ${error.response.status}`],
         rawResponse: errorData,
+        sourceAttribution: {
+          payer: params.stediPayerId,
+          payerId: params.stediPayerId,
+          timestamp: new Date().toISOString(),
+          responseFormat: 'X12_271',
+        },
       };
     }
 

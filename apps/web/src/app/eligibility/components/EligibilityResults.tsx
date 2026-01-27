@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { EligibilityResponse, AgentUsage, DiscrepancyReport, Discrepancy } from '@eligibility-agent/shared';
 import { formatDateOrNA } from '../../../lib/format-date';
+import SourceAttribution from './SourceAttribution';
 
 interface EligibilityResultsProps {
   result: EligibilityResponse;
@@ -218,36 +219,181 @@ function MarkdownRenderer({ content }: { content: string }) {
   );
 }
 
+interface JsonNodeProps {
+  keyName?: string;
+  value: unknown;
+  depth: number;
+  defaultExpanded?: boolean;
+}
+
+function JsonNode({ keyName, value, depth, defaultExpanded = false }: JsonNodeProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded || depth < 2);
+  const indent = depth * 12;
+
+  // Render primitive values with syntax highlighting
+  if (value === null) {
+    return (
+      <span style={{ paddingLeft: indent }}>
+        {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+        {keyName && <span className="text-neutral-400">: </span>}
+        <span className="text-orange-400">null</span>
+      </span>
+    );
+  }
+
+  if (typeof value === 'boolean') {
+    return (
+      <span style={{ paddingLeft: indent }}>
+        {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+        {keyName && <span className="text-neutral-400">: </span>}
+        <span className="text-orange-400">{value ? 'true' : 'false'}</span>
+      </span>
+    );
+  }
+
+  if (typeof value === 'number') {
+    return (
+      <span style={{ paddingLeft: indent }}>
+        {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+        {keyName && <span className="text-neutral-400">: </span>}
+        <span className="text-cyan-400">{value}</span>
+      </span>
+    );
+  }
+
+  if (typeof value === 'string') {
+    // Truncate very long strings
+    const displayValue = value.length > 100 ? `${value.slice(0, 100)}...` : value;
+    return (
+      <span style={{ paddingLeft: indent }}>
+        {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+        {keyName && <span className="text-neutral-400">: </span>}
+        <span className="text-green-400">&quot;{displayValue}&quot;</span>
+      </span>
+    );
+  }
+
+  // Handle arrays
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return (
+        <span style={{ paddingLeft: indent }}>
+          {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+          {keyName && <span className="text-neutral-400">: </span>}
+          <span className="text-neutral-400">[]</span>
+        </span>
+      );
+    }
+
+    return (
+      <div style={{ paddingLeft: indent }}>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-left hover:bg-neutral-800 rounded px-1 -ml-1"
+        >
+          <span className="text-neutral-500">{expanded ? '[-]' : '[+]'}</span>
+          {keyName && <span className="text-purple-400 ml-1">&quot;{keyName}&quot;</span>}
+          {keyName && <span className="text-neutral-400">: </span>}
+          <span className="text-neutral-400">[</span>
+          {!expanded && <span className="text-neutral-500">{value.length} items</span>}
+          {!expanded && <span className="text-neutral-400">]</span>}
+        </button>
+        {expanded && (
+          <div className="pl-2">
+            {value.map((item, i) => (
+              <div key={i}>
+                <JsonNode value={item} depth={depth + 1} />
+                {i < value.length - 1 && <span className="text-neutral-400">,</span>}
+              </div>
+            ))}
+            <div style={{ paddingLeft: 0 }}>
+              <span className="text-neutral-400">]</span>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Handle objects
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (entries.length === 0) {
+      return (
+        <span style={{ paddingLeft: indent }}>
+          {keyName && <span className="text-purple-400">&quot;{keyName}&quot;</span>}
+          {keyName && <span className="text-neutral-400">: </span>}
+          <span className="text-neutral-400">{'{}'}</span>
+        </span>
+      );
+    }
+
+    return (
+      <div style={{ paddingLeft: indent }}>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-left hover:bg-neutral-800 rounded px-1 -ml-1"
+        >
+          <span className="text-neutral-500">{expanded ? '[-]' : '[+]'}</span>
+          {keyName && <span className="text-purple-400 ml-1">&quot;{keyName}&quot;</span>}
+          {keyName && <span className="text-neutral-400">: </span>}
+          <span className="text-neutral-400">{'{'}</span>
+          {!expanded && <span className="text-neutral-500">{entries.length} keys</span>}
+          {!expanded && <span className="text-neutral-400">{'}'}</span>}
+        </button>
+        {expanded && (
+          <div className="pl-2">
+            {entries.map(([k, v], i) => (
+              <div key={k}>
+                <JsonNode keyName={k} value={v} depth={depth + 1} />
+                {i < entries.length - 1 && <span className="text-neutral-400">,</span>}
+              </div>
+            ))}
+            <div style={{ paddingLeft: 0 }}>
+              <span className="text-neutral-400">{'}'}</span>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function JsonViewer({ data }: { data: unknown }) {
-  const [expanded, setExpanded] = useState(false);
+  const [allExpanded, setAllExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
   const jsonString = JSON.stringify(data, null, 2);
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(jsonString);
+  const copyToClipboard = async () => {
+    await navigator.clipboard.writeText(jsonString);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
     <div className="bg-neutral-900 rounded-lg overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 bg-neutral-800">
         <span className="text-xs text-neutral-400 font-mono">X12 271 Response</span>
-        <div className="flex gap-2">
+        <div className="flex gap-3">
           <button
             onClick={copyToClipboard}
             className="text-xs text-neutral-400 hover:text-white transition-colors"
           >
-            Copy
+            {copied ? 'Copied!' : 'Copy'}
           </button>
           <button
-            onClick={() => setExpanded(!expanded)}
+            onClick={() => setAllExpanded(!allExpanded)}
             className="text-xs text-neutral-400 hover:text-white transition-colors"
           >
-            {expanded ? 'Collapse' : 'Expand'}
+            {allExpanded ? 'Collapse All' : 'Expand All'}
           </button>
         </div>
       </div>
-      <pre className={`p-3 text-xs text-green-400 font-mono overflow-x-auto ${expanded ? '' : 'max-h-64'}`}>
-        {jsonString}
-      </pre>
+      <div className="p-3 text-xs font-mono overflow-x-auto max-h-96 overflow-y-auto">
+        <JsonNode value={data} depth={0} defaultExpanded={allExpanded} key={allExpanded ? 'expanded' : 'collapsed'} />
+      </div>
     </div>
   );
 }
@@ -508,6 +654,14 @@ export default function EligibilityResults({
       <div className="p-4">
         {activeTab === 'summary' && (
           <div className="space-y-4">
+            {/* Source Attribution */}
+            {result.sourceAttribution && (
+              <SourceAttribution
+                source={result.sourceAttribution}
+                onViewRawResponse={() => setActiveTab('raw')}
+              />
+            )}
+
             {summary ? (
               <>
                 <MarkdownRenderer content={summary} />

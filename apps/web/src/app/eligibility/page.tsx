@@ -225,7 +225,9 @@ function EligibilityContent() {
             {
               id: `${Date.now()}-tool-end`,
               type: 'tool_end',
+              toolUseId: event.toolUseId,
               tool: event.tool,
+              input: event.input, // Include input from tool_end for display
               result: event.result,
               timestamp: Date.now(),
             },

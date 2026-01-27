@@ -1,11 +1,18 @@
 /**
  * Agent Loop for the Eligibility Agent
  *
- * Uses Anthropic SDK directly with tool use for eligibility verification.
+ * Uses Anthropic SDK directly with streaming + extended thinking for eligibility verification.
  * Persists agent runs to database for history and debugging.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import type {
+  ContentBlock,
+  ThinkingBlock,
+  TextBlock,
+  ToolUseBlock,
+  RawMessageStreamEvent,
+} from '@anthropic-ai/sdk/resources/messages';
 import { prisma } from '@eligibility-agent/db';
 import type {
   AgentInput,
@@ -266,88 +273,167 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
 
       turnCount++;
 
-      // Make API call
-      const response = await client.messages.create({
+      // Create streaming request with extended thinking
+      const stream = client.messages.stream({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 8192,
+        max_tokens: 16000, // Must be > budget_tokens
+        thinking: {
+          type: 'enabled',
+          budget_tokens: AGENT_LIMITS.THINKING_BUDGET_TOKENS,
+        },
         system: ELIGIBILITY_SYSTEM_PROMPT,
         tools: TOOLS,
         messages,
       });
 
-      // Track usage
-      totalInputTokens += response.usage.input_tokens;
-      totalOutputTokens += response.usage.output_tokens;
-
-      // Process response content
+      // Track content blocks as they complete
+      const contentBlocks: ContentBlock[] = [];
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
-      for (const block of response.content) {
-        if (block.type === 'thinking') {
-          yield {
-            type: 'thinking',
-            thinking: block.thinking,
-          };
-        } else if (block.type === 'text') {
-          accumulatedText += block.text;
-          yield {
-            type: 'text',
-            text: block.text,
-          };
-        } else if (block.type === 'tool_use') {
-          yield {
-            type: 'tool_start',
-            toolUseId: block.id,
-            tool: block.name,
-            input: block.input as Record<string, unknown>,
-          };
+      // Track current block state for streaming
+      let currentBlockIndex = -1;
+      let currentBlockType: string | null = null;
+      let currentToolName: string | null = null;
+      let currentToolId: string | null = null;
+      let accumulatedToolInput = '';
+      let accumulatedThinking = '';
+      let accumulatedBlockText = ''; // Text for current block only
+      let thinkingSignature: string | undefined;
 
-          // Execute the tool
-          let toolInput = block.input as Record<string, unknown>;
+      // Process streaming events
+      for await (const event of stream as AsyncIterable<RawMessageStreamEvent>) {
+        if (event.type === 'content_block_start') {
+          currentBlockIndex = event.index;
+          currentBlockType = event.content_block.type;
+          accumulatedToolInput = '';
+          accumulatedThinking = '';
+          accumulatedBlockText = '';
+          thinkingSignature = undefined;
 
-          // Special handling for discover_insurance
-          if (block.name === 'discover_insurance') {
-            toolInput = {
-              firstName: toolInput.firstName,
-              lastName: toolInput.lastName,
-              dateOfBirth: toolInput.dateOfBirth,
-              providerNpi: toolInput.providerNpi,
-              address: toolInput.street ? {
-                street: toolInput.street,
-                city: toolInput.city,
-                state: toolInput.state,
-                zipCode: toolInput.zipCode,
-              } : undefined,
-              ssn: toolInput.ssn,
-              gender: toolInput.gender,
+          if (event.content_block.type === 'tool_use') {
+            currentToolName = event.content_block.name;
+            currentToolId = event.content_block.id;
+            yield {
+              type: 'tool_start',
+              toolUseId: event.content_block.id,
+              tool: event.content_block.name,
+              input: {}, // Will be populated when block completes
             };
           }
+        } else if (event.type === 'content_block_delta') {
+          if (event.delta.type === 'thinking_delta') {
+            accumulatedThinking += event.delta.thinking;
+            // Stream thinking deltas immediately
+            yield {
+              type: 'thinking',
+              thinking: event.delta.thinking,
+            };
+          } else if (event.delta.type === 'signature_delta') {
+            thinkingSignature = (thinkingSignature || '') + event.delta.signature;
+          } else if (event.delta.type === 'text_delta') {
+            accumulatedBlockText += event.delta.text;
+            accumulatedText += event.delta.text; // Also track across all turns for JSON parsing
+            yield {
+              type: 'text',
+              text: event.delta.text,
+            };
+          } else if (event.delta.type === 'input_json_delta') {
+            accumulatedToolInput += event.delta.partial_json;
+          }
+        } else if (event.type === 'content_block_stop') {
+          // Block is complete - add to contentBlocks
+          if (currentBlockType === 'thinking') {
+            // Create thinking block with signature for multi-turn
+            const thinkingBlock: ThinkingBlock = {
+              type: 'thinking',
+              thinking: accumulatedThinking,
+              signature: thinkingSignature || '',
+            };
+            contentBlocks.push(thinkingBlock);
+          } else if (currentBlockType === 'text') {
+            const textBlock: TextBlock = {
+              type: 'text',
+              text: accumulatedBlockText,
+              citations: null, // No citations for agent text output
+            };
+            contentBlocks.push(textBlock);
+          } else if (currentBlockType === 'tool_use' && currentToolId && currentToolName) {
+            // Parse accumulated JSON input
+            let toolInput: Record<string, unknown> = {};
+            try {
+              if (accumulatedToolInput) {
+                toolInput = JSON.parse(accumulatedToolInput);
+              }
+            } catch {
+              serviceLogger.warn({ toolInput: accumulatedToolInput }, 'Failed to parse tool input JSON');
+            }
 
-          const result = await executeTool(block.name, toolInput);
+            const toolUseBlock: ToolUseBlock = {
+              type: 'tool_use',
+              id: currentToolId,
+              name: currentToolName,
+              input: toolInput,
+            };
+            contentBlocks.push(toolUseBlock);
 
-          // Check if this is an eligibility result
-          const resultData = result?.data as Record<string, unknown> | undefined;
-          if (result?.success && resultData?.status) {
-            eligibilityResult = resultData as unknown as EligibilityResponse;
+            // Execute the tool
+            let finalToolInput = toolInput;
+
+            // Special handling for discover_insurance
+            if (currentToolName === 'discover_insurance') {
+              finalToolInput = {
+                firstName: toolInput.firstName,
+                lastName: toolInput.lastName,
+                dateOfBirth: toolInput.dateOfBirth,
+                providerNpi: toolInput.providerNpi,
+                address: toolInput.street ? {
+                  street: toolInput.street,
+                  city: toolInput.city,
+                  state: toolInput.state,
+                  zipCode: toolInput.zipCode,
+                } : undefined,
+                ssn: toolInput.ssn,
+                gender: toolInput.gender,
+              };
+            }
+
+            const result = await executeTool(currentToolName, finalToolInput);
+
+            // Check if this is an eligibility result
+            const resultData = result?.data as Record<string, unknown> | undefined;
+            if (result?.success && resultData?.status) {
+              eligibilityResult = resultData as unknown as EligibilityResponse;
+            }
+
+            yield {
+              type: 'tool_end',
+              toolUseId: currentToolId,
+              tool: currentToolName,
+              input: toolInput, // Include parsed input for UI display
+              result,
+            };
+
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: currentToolId,
+              content: JSON.stringify(result),
+            });
           }
 
-          yield {
-            type: 'tool_end',
-            toolUseId: block.id,
-            tool: block.name,
-            result,
-          };
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(result),
-          });
+          // Reset current block state
+          currentBlockType = null;
+          currentToolName = null;
+          currentToolId = null;
         }
       }
 
-      // Add assistant response to messages
-      messages.push({ role: 'assistant', content: response.content });
+      // Get final message for usage stats and stop reason
+      const finalMessage = await stream.finalMessage();
+      totalInputTokens += finalMessage.usage.input_tokens;
+      totalOutputTokens += finalMessage.usage.output_tokens;
+
+      // Add assistant response to messages (preserving thinking blocks for multi-turn)
+      messages.push({ role: 'assistant', content: contentBlocks });
 
       // If there were tool calls, add the results and continue
       if (toolResults.length > 0) {
@@ -355,12 +441,12 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
       }
 
       // Check if we should stop
-      if (response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence') {
+      if (finalMessage.stop_reason === 'end_turn' || finalMessage.stop_reason === 'stop_sequence') {
         break;
       }
 
       // If no tool use and not end_turn, something unexpected happened
-      if (toolResults.length === 0 && response.stop_reason !== 'tool_use') {
+      if (toolResults.length === 0 && finalMessage.stop_reason !== 'tool_use') {
         break;
       }
     }
