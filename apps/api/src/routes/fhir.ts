@@ -10,12 +10,13 @@
  * 3. PF access token retrieved from database (auto-refreshed if needed)
  */
 
-import { FastifyPluginAsync } from 'fastify';
-import axios from 'axios';
+import { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { prisma } from '@eligibility-agent/db';
 import type { FhirPatient, FhirCoverage, FhirPractitioner, PatientInfo, InsuranceInfo, ProviderInfo } from '@eligibility-agent/shared';
-import { getPfToken } from '../services/session-service.js';
+import { getPfToken, refreshPfAccessToken } from '../services/session-service.js';
 import { auditViewPatient, auditViewCoverage } from '../services/audit-service.js';
+import { serviceLogger } from '../lib/logger.js';
 
 /**
  * Allowed FHIR server domains.
@@ -62,6 +63,61 @@ async function getFhirBaseUrl(tenantId: string): Promise<string | null> {
     select: { issuer: true },
   });
   return tenant?.issuer || null;
+}
+
+/**
+ * Make a FHIR request with automatic retry on 401.
+ * If the request returns 401, refreshes the PF token and retries once.
+ */
+async function fhirRequestWithRetry<T>(
+  sessionId: string,
+  url: string,
+  config: AxiosRequestConfig = {}
+): Promise<AxiosResponse<T>> {
+  // Get initial token
+  const token = await getPfToken(sessionId);
+  if (!token) {
+    throw new FhirAuthError('Session token not available');
+  }
+
+  const makeRequest = async (accessToken: string) => {
+    return axios.get<T>(url, {
+      ...config,
+      headers: {
+        ...config.headers,
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/fhir+json',
+      },
+    });
+  };
+
+  try {
+    return await makeRequest(token);
+  } catch (error) {
+    // If 401, try to refresh and retry once
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      serviceLogger.info({ sessionId, url }, 'Got 401, attempting token refresh');
+
+      const newToken = await refreshPfAccessToken(sessionId);
+      if (!newToken) {
+        throw new FhirAuthError('Token refresh failed - please re-authenticate');
+      }
+
+      serviceLogger.info({ sessionId }, 'Token refreshed, retrying request');
+      return await makeRequest(newToken);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Custom error for FHIR auth failures.
+ */
+class FhirAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FhirAuthError';
+  }
 }
 
 function transformPatient(fhir: FhirPatient): PatientInfo {
@@ -168,20 +224,6 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    // Get PF access token from session (auto-refreshes if needed)
-    const accessToken = await getPfToken(session.id, fhirBaseUrl);
-    if (!accessToken) {
-      return reply.status(401).send({
-        success: false,
-        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
-      });
-    }
-
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/fhir+json',
-    };
-
     try {
       // Extract practitioner ID from session's userFhirId
       let loggedInProviderId: string | null = null;
@@ -193,22 +235,26 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Fetch Patient, Coverage, and Practitioner in PARALLEL for speed
+      // Uses retry-on-401 wrapper for automatic token refresh
       fastify.log.info({ fhirBaseUrl, patientId, loggedInProviderId }, 'Fetching FHIR resources in parallel');
       const startTime = Date.now();
 
       const [patientResult, coverageResult, practitionerResult] = await Promise.allSettled([
-        axios.get<FhirPatient>(
+        fhirRequestWithRetry<FhirPatient>(
+          session.id,
           `${fhirBaseUrl}/Patient/${patientId}`,
-          { headers, timeout: 15000 }
+          { timeout: 15000 }
         ),
-        axios.get<{ entry?: Array<{ resource: FhirCoverage }> }>(
+        fhirRequestWithRetry<{ entry?: Array<{ resource: FhirCoverage }> }>(
+          session.id,
           `${fhirBaseUrl}/Coverage?patient=${patientId}`,
-          { headers, timeout: 15000 }
+          { timeout: 15000 }
         ),
         loggedInProviderId
-          ? axios.get<FhirPractitioner>(
+          ? fhirRequestWithRetry<FhirPractitioner>(
+              session.id,
               `${fhirBaseUrl}/Practitioner/${loggedInProviderId}`,
-              { headers, timeout: 15000 }
+              { timeout: 15000 }
             )
           : Promise.resolve(null),
       ]);
@@ -276,6 +322,14 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       fastify.log.error(error, 'FHIR request failed');
 
+      // Handle auth errors (token expired/refresh failed)
+      if (error instanceof FhirAuthError) {
+        return reply.status(401).send({
+          success: false,
+          error: { code: 'TOKEN_EXPIRED', message: error.message },
+        });
+      }
+
       if (axios.isAxiosError(error) && error.response) {
         const status = error.response.status;
         const message = error.response.data?.issue?.[0]?.diagnostics
@@ -326,30 +380,18 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    const accessToken = await getPfToken(session.id, fhirBaseUrl);
-    if (!accessToken) {
-      return reply.status(401).send({
-        success: false,
-        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
-      });
-    }
-
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/fhir+json',
-    };
-
     try {
       const searchUrl = `${fhirBaseUrl}/Practitioner?_count=${count}&_offset=${offset}&_sort=family`;
 
       fastify.log.info({ searchUrl, count, offset }, 'Fetching practitioners');
 
-      const practResponse = await axios.get<{
+      const practResponse = await fhirRequestWithRetry<{
         entry?: Array<{ resource: FhirPractitioner }>;
         total?: number;
       }>(
+        session.id,
         searchUrl,
-        { headers, timeout: 15000 }
+        { timeout: 15000 }
       );
 
       const practitioners = (practResponse.data.entry || [])
@@ -369,8 +411,16 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
           hasMore,
         }
       };
-    } catch (err) {
-      fastify.log.error(err, 'Failed to fetch practitioners');
+    } catch (error) {
+      fastify.log.error(error, 'Failed to fetch practitioners');
+
+      if (error instanceof FhirAuthError) {
+        return reply.status(401).send({
+          success: false,
+          error: { code: 'TOKEN_EXPIRED', message: error.message },
+        });
+      }
+
       return reply.status(500).send({
         success: false,
         error: { code: 'FETCH_FAILED', message: 'Failed to fetch practitioners' },
@@ -407,24 +457,11 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    const accessToken = await getPfToken(session.id, fhirBaseUrl);
-    if (!accessToken) {
-      return reply.status(401).send({
-        success: false,
-        error: { code: 'TOKEN_EXPIRED', message: 'Session token has expired. Please re-authenticate.' },
-      });
-    }
-
     try {
-      const response = await axios.get(
+      const response = await fhirRequestWithRetry(
+        session.id,
         `${fhirBaseUrl}/${resourceType}/${resourceId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            Accept: 'application/fhir+json',
-          },
-          timeout: 30000,
-        }
+        { timeout: 30000 }
       );
 
       return {
@@ -433,6 +470,13 @@ const fhirRoutes: FastifyPluginAsync = async (fastify) => {
       };
     } catch (error) {
       fastify.log.error(error, 'FHIR request failed');
+
+      if (error instanceof FhirAuthError) {
+        return reply.status(401).send({
+          success: false,
+          error: { code: 'TOKEN_EXPIRED', message: error.message },
+        });
+      }
 
       if (axios.isAxiosError(error) && error.response) {
         return reply.status(error.response.status).send({

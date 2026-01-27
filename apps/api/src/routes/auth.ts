@@ -392,6 +392,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         pfAccessToken: tokenData.access_token,
         pfRefreshToken: tokenData.refresh_token || null,
         pfExpiresIn: tokenData.expires_in || 3600,
+        tokenEndpoint: launchState.tokenUrl, // Store for token refresh
       });
 
       // Audit the login
@@ -520,6 +521,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         pfAccessToken: tokenData.access_token,
         pfRefreshToken: tokenData.refresh_token || null,
         pfExpiresIn: tokenData.expires_in || 3600,
+        tokenEndpoint: launchState.tokenUrl, // Store for token refresh
       });
 
       // Audit the login

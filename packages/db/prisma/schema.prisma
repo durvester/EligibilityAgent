@@ -46,6 +46,7 @@ model Session {
   pfAccessTokenEncrypted  String    @map("pf_access_token_encrypted")
   pfRefreshTokenEncrypted String?   @map("pf_refresh_token_encrypted")
   pfTokenExpiresAt        DateTime  @map("pf_token_expires_at")
+  tokenEndpoint           String?   @map("token_endpoint") // OAuth token endpoint for refresh
 
   patientId      String?  @map("patient_id")
   scope          String?

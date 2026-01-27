@@ -14,13 +14,11 @@
 
 import { prisma } from '@eligibility-agent/db';
 import { encrypt, decrypt } from '../lib/encryption.js';
-import { signInternalJwt, verifyInternalJwt, type JwtPayload } from '../lib/jwt.js';
+import { signInternalJwt, verifyInternalJwt } from '../lib/jwt.js';
 import { cacheGet, cacheSet, cacheDelete, CacheKeys, CacheTTL } from '../lib/redis.js';
 import { serviceLogger } from '../lib/logger.js';
 import axios from 'axios';
 
-// Buffer time before expiration to trigger refresh (5 minutes)
-const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 export interface SessionInfo {
   id: string;
@@ -39,6 +37,7 @@ export interface CreateSessionInput {
   pfAccessToken: string;
   pfRefreshToken: string | null;
   pfExpiresIn: number; // seconds
+  tokenEndpoint: string; // OAuth token endpoint for refresh
 }
 
 /**
@@ -65,6 +64,7 @@ export async function createSession(
         ? encrypt(input.pfRefreshToken)
         : null,
       pfTokenExpiresAt,
+      tokenEndpoint: input.tokenEndpoint, // Store for token refresh
       patientId: input.patientId,
       scope: input.scope,
     },
@@ -161,16 +161,12 @@ export async function getSessionByJwtId(jwtId: string): Promise<SessionInfo | nu
 
 /**
  * Get decrypted PF access token for FHIR calls.
- * Auto-refreshes if token is close to expiration.
+ * Returns the current token without checking expiry - caller handles 401 retry.
  *
  * @param sessionId - Session ID
- * @param fhirBaseUrl - FHIR server URL (for token refresh)
- * @returns Decrypted access token or null if session expired/invalid
+ * @returns Decrypted access token or null if session invalid/revoked
  */
-export async function getPfToken(
-  sessionId: string,
-  fhirBaseUrl: string
-): Promise<string | null> {
+export async function getPfToken(sessionId: string): Promise<string | null> {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
   });
@@ -179,31 +175,79 @@ export async function getPfToken(
     return null;
   }
 
-  const now = Date.now();
-  const needsRefresh = session.pfTokenExpiresAt.getTime() - now < REFRESH_BUFFER_MS;
+  return decrypt(session.pfAccessTokenEncrypted);
+}
 
-  if (needsRefresh && session.pfRefreshTokenEncrypted) {
-    // Attempt to refresh
-    const refreshed = await refreshPfToken(
-      sessionId,
-      decrypt(session.pfRefreshTokenEncrypted),
-      fhirBaseUrl
+/**
+ * Get token endpoint for a session (used for refresh).
+ */
+export async function getTokenEndpoint(sessionId: string): Promise<string | null> {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { tokenEndpoint: true },
+  });
+  return session?.tokenEndpoint || null;
+}
+
+/**
+ * Refresh PF access token using the refresh token.
+ * Called when a FHIR request returns 401.
+ *
+ * @param sessionId - Session ID
+ * @returns New access token or null if refresh failed
+ */
+export async function refreshPfAccessToken(sessionId: string): Promise<string | null> {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+  });
+
+  if (!session || session.revoked || !session.pfRefreshTokenEncrypted || !session.tokenEndpoint) {
+    serviceLogger.warn({ sessionId, hasRefreshToken: !!session?.pfRefreshTokenEncrypted, hasTokenEndpoint: !!session?.tokenEndpoint }, 'Cannot refresh PF token');
+    return null;
+  }
+
+  try {
+    const refreshToken = decrypt(session.pfRefreshTokenEncrypted);
+
+    const response = await axios.post(
+      session.tokenEndpoint,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: process.env.PF_CLIENT_ID || '',
+        client_secret: process.env.PF_CLIENT_SECRET || '',
+      }),
+      {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 30000,
+      }
     );
 
-    if (refreshed) {
-      return refreshed;
-    }
-    // If refresh failed, try existing token if still valid
-  }
+    const data = response.data;
+    const expiresIn = data.expires_in || 3600;
+    const pfTokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
 
-  // Return existing token if not expired
-  if (session.pfTokenExpiresAt.getTime() > now) {
-    return decrypt(session.pfAccessTokenEncrypted);
-  }
+    // Update session with new tokens
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: {
+        pfAccessTokenEncrypted: encrypt(data.access_token),
+        pfRefreshTokenEncrypted: data.refresh_token
+          ? encrypt(data.refresh_token)
+          : session.pfRefreshTokenEncrypted, // Keep old if new not provided
+        pfTokenExpiresAt,
+      },
+    });
 
-  // Token expired and couldn't refresh
-  serviceLogger.warn({ sessionId }, 'PF token expired and refresh failed');
-  return null;
+    serviceLogger.info({ sessionId }, 'PF token refreshed successfully');
+    return data.access_token;
+  } catch (error) {
+    serviceLogger.error(
+      { error: error instanceof Error ? error.message : 'Unknown', sessionId },
+      'PF token refresh failed'
+    );
+    return null;
+  }
 }
 
 /**
@@ -305,127 +349,3 @@ export async function verifyAndGetSession(token: string): Promise<SessionInfo | 
   }
 }
 
-// ============================================================================
-// Private helpers
-// ============================================================================
-
-/**
- * Refresh PF OAuth token using refresh token.
- */
-async function refreshPfToken(
-  sessionId: string,
-  refreshToken: string,
-  fhirBaseUrl: string
-): Promise<string | null> {
-  try {
-    // Validate inputs
-    if (!fhirBaseUrl || fhirBaseUrl.trim() === '') {
-      serviceLogger.error({ sessionId, fhirBaseUrl }, 'Cannot refresh PF token: FHIR base URL is empty');
-      return null;
-    }
-
-    // Discover token endpoint
-    const tokenEndpoint = await discoverTokenEndpoint(fhirBaseUrl);
-
-    const response = await axios.post(
-      tokenEndpoint,
-      new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: process.env.PF_CLIENT_ID || '',
-        client_secret: process.env.PF_CLIENT_SECRET || '',
-      }),
-      {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        timeout: 30000,
-      }
-    );
-
-    const data = response.data;
-    const expiresIn = data.expires_in || 3600;
-    const pfTokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
-
-    // Update session with new tokens
-    await prisma.session.update({
-      where: { id: sessionId },
-      data: {
-        pfAccessTokenEncrypted: encrypt(data.access_token),
-        pfRefreshTokenEncrypted: data.refresh_token
-          ? encrypt(data.refresh_token)
-          : encrypt(refreshToken), // Keep old refresh token if new one not provided
-        pfTokenExpiresAt,
-      },
-    });
-
-    serviceLogger.info({ sessionId }, 'PF token refreshed');
-    return data.access_token;
-  } catch (error) {
-    serviceLogger.error(
-      { error: error instanceof Error ? error.message : 'Unknown', sessionId },
-      'PF token refresh failed'
-    );
-    return null;
-  }
-}
-
-/**
- * Discover token endpoint from FHIR server.
- */
-async function discoverTokenEndpoint(fhirBaseUrl: string): Promise<string> {
-  // Validate the URL before attempting to use it
-  if (!fhirBaseUrl || fhirBaseUrl.trim() === '') {
-    throw new Error('FHIR base URL is required for token endpoint discovery');
-  }
-
-  // Try to parse the URL to validate it
-  try {
-    new URL(fhirBaseUrl);
-  } catch {
-    throw new Error(`Invalid FHIR base URL: ${fhirBaseUrl}`);
-  }
-
-  const baseUrl = fhirBaseUrl.replace(/\/$/, '');
-
-  // Check cache first
-  const cached = await cacheGet<string>(CacheKeys.smartConfig(baseUrl));
-  if (cached) {
-    return cached;
-  }
-
-  // Try .well-known/smart-configuration
-  try {
-    const response = await axios.get(`${baseUrl}/.well-known/smart-configuration`, {
-      timeout: 10000,
-      headers: { Accept: 'application/json' },
-    });
-
-    const tokenEndpoint = response.data.token_endpoint;
-    await cacheSet(CacheKeys.smartConfig(baseUrl), tokenEndpoint, CacheTTL.SMART_CONFIG);
-    return tokenEndpoint;
-  } catch {
-    // Fall back to metadata
-  }
-
-  // Try metadata endpoint
-  const metadataResponse = await axios.get(`${baseUrl}/metadata`, {
-    timeout: 10000,
-    headers: { Accept: 'application/fhir+json' },
-  });
-
-  const security = metadataResponse.data.rest?.[0]?.security;
-  const oauthExtension = security?.extension?.find(
-    (ext: { url: string }) =>
-      ext.url === 'http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris'
-  );
-
-  const tokenUrl = oauthExtension?.extension?.find(
-    (e: { url: string }) => e.url === 'token'
-  )?.valueUri;
-
-  if (!tokenUrl) {
-    throw new Error('Could not discover token endpoint');
-  }
-
-  await cacheSet(CacheKeys.smartConfig(baseUrl), tokenUrl, CacheTTL.SMART_CONFIG);
-  return tokenUrl;
-}
