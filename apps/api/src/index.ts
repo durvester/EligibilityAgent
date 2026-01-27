@@ -17,7 +17,6 @@ import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
-import fastifySSE from '@fastify/sse';
 
 import authRoutes from './routes/auth.js';
 import fhirRoutes from './routes/fhir.js';
@@ -46,8 +45,6 @@ await fastify.register(cors, {
 await fastify.register(cookie);
 await fastify.register(formbody);
 await fastify.register(multipart);
-// @ts-expect-error - CJS/ESM interop issue with @fastify/sse types
-await fastify.register(fastifySSE);
 
 // Rate limiting
 await fastify.register(rateLimit, {
