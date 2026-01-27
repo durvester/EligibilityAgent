@@ -402,9 +402,14 @@ const practitionerId = match?.[1];
 // Register plugin and use { sse: true } route option
 await fastify.register(fastifySSE);
 fastify.post('/eligibility', { sse: true }, async (request, reply) => {
-  // DON'T stringify - plugin handles serialization
-  await reply.sse.send({ data: { type: 'start' } });
-  await reply.sse.send({ data: event }); // Pass object directly
+  // For async generators, use reply.sse.send() which accepts AsyncIterable<SSEMessage>
+  async function* eventStream() {
+    yield { data: { type: 'start' } };
+    for await (const event of runAgent()) {
+      yield { data: event };  // SSEMessage format: { data: any, event?: string, id?: string }
+    }
+  }
+  return reply.sse.send(eventStream());
 });
 ```
 

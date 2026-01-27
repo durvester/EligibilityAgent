@@ -128,8 +128,20 @@ export async function* runEligibilityAgent(
   input: AgentInput,
   context?: AgentContext
 ): AsyncGenerator<AgentEvent> {
-  const client = new Anthropic();
+  let client: Anthropic;
   const startTime = Date.now();
+
+  // Initialize Anthropic client with error handling
+  try {
+    client = new Anthropic();
+  } catch (error) {
+    serviceLogger.error({ error }, 'Failed to initialize Anthropic client');
+    yield {
+      type: 'error',
+      message: error instanceof Error ? error.message : 'Failed to initialize AI client',
+    };
+    return;
+  }
 
   // Create AgentRun record if we have context
   let agentRunId: string | null = null;

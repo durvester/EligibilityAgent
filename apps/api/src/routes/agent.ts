@@ -204,6 +204,7 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
 
     // Use @fastify/sse plugin to stream the events
     // The plugin serializes data to JSON automatically
+    // Note: reply.sse.send() accepts AsyncIterable<SSEMessage> for streaming
     return reply.sse.send(eventStream());
   });
 

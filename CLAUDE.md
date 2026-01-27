@@ -328,8 +328,8 @@ See `CODE_AUDIT.md` for full audit report covering security, performance, and qu
 1. **SSE Streaming Fixed**:
    - Integrated `@fastify/sse` plugin for proper SSE handling
    - Fixed double JSON encoding issue (plugin handles serialization, don't call `JSON.stringify()`)
-   - Direct API calls from frontend (bypasses Next.js proxy which buffers SSE)
-   - Uses `NEXT_PUBLIC_API_URL` environment variable for API endpoint
+   - Uses Route Handler proxy (`/api/agent/eligibility`) which properly forwards cookies
+   - For async generators, use `reply.sse()` not `reply.sse.send()`
 
 2. **Anthropic SDK Integration**:
    - Using `@anthropic-ai/sdk` with direct messages API and tool use
@@ -344,12 +344,17 @@ See `CODE_AUDIT.md` for full audit report covering security, performance, and qu
 
 4. **Key SSE Implementation Notes**:
    ```typescript
-   // Server: Don't stringify - @fastify/sse handles it
-   await reply.sse.send({ data: event }); // CORRECT
-   await reply.sse.send({ data: JSON.stringify(event) }); // WRONG - double encoding
+   // Server: reply.sse.send() accepts AsyncIterable<SSEMessage> for streaming
+   async function* eventStream() {
+     yield { data: { type: 'start' } };  // SSEMessage format
+     for await (const event of runAgent()) {
+       yield { data: event };
+     }
+   }
+   return reply.sse.send(eventStream()); // Streams async iterable
 
-   // Client: Call API directly, not through Next.js proxy
-   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+   // Client: Uses Route Handler proxy (forwards cookies correctly)
+   await fetchSSE('/api/agent/eligibility', body, options);
    ```
 
 5. **Code Cleanup**:
