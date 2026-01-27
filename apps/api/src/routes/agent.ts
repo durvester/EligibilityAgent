@@ -2,7 +2,10 @@
  * Agent Route - SSE Endpoint for Eligibility Agent
  *
  * Streams agent events to the client in real-time using Server-Sent Events.
- * Uses @fastify/sse plugin for proper SSE handling.
+ * Uses MANUAL SSE handling (reply.raw) to work with proxied requests.
+ *
+ * NOTE: @fastify/sse plugin doesn't work reliably with proxied requests.
+ * Manual handling with reply.raw.write() is more reliable.
  */
 
 import { FastifyPluginAsync } from 'fastify';
@@ -75,7 +78,7 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
    * POST /agent/eligibility
    *
    * Runs the eligibility agent and streams events via SSE.
-   * Uses @fastify/sse plugin with async generator for proper streaming.
+   * Uses manual SSE handling to work with proxied requests.
    *
    * Request body: AgentInput
    * Response: SSE stream of AgentEvent objects
@@ -84,7 +87,7 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
    * - Patient first name, last name, DOB
    * - Provider NPI OR provider name (first + last)
    */
-  fastify.post<{ Body: EligibilityAgentBody }>('/eligibility', { sse: true }, async (request, reply) => {
+  fastify.post<{ Body: EligibilityAgentBody }>('/eligibility', async (request, reply) => {
     const requestId = `req-${Date.now()}`;
     const startTime = Date.now();
 
@@ -115,6 +118,27 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
       hasRawFhir: !!rawFhir,
     }, 'Starting eligibility agent');
 
+    // Set up SSE headers manually (works with proxied requests)
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no', // Disable nginx/proxy buffering
+    });
+
+    // Helper to send SSE event
+    const sendEvent = (data: AgentEvent): boolean => {
+      try {
+        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // Send initial event
+    sendEvent({ type: 'start' });
+
     const input: AgentInput = {
       patient,
       insurance,
@@ -139,79 +163,63 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    // Track disconnection via abort signal
-    const abortController = new AbortController();
+    // Track disconnection
+    let clientDisconnected = false;
     request.raw.on('close', () => {
-      abortController.abort();
+      clientDisconnected = true;
       fastify.log.info({ requestId, elapsed: Date.now() - startTime }, 'Client disconnected from agent SSE');
     });
 
-    /**
-     * Async generator that yields SSE events.
-     * @fastify/sse plugin handles the SSE protocol.
-     */
-    async function* eventStream(): AsyncGenerator<{ data: AgentEvent }> {
-      // Send initial start event
-      yield { data: { type: 'start' } as AgentEvent };
+    let eventCount = 0;
+    try {
+      // Run the agent and stream events
+      for await (const event of runEligibilityAgent(input, context)) {
+        eventCount++;
 
-      let eventCount = 0;
-      try {
-        // Run the agent and stream events
-        for await (const event of runEligibilityAgent(input, context)) {
-          eventCount++;
-
-          // Check if client disconnected
-          if (abortController.signal.aborted) {
-            fastify.log.info({ requestId, eventCount, elapsed: Date.now() - startTime }, 'Stopping agent - client disconnected');
-            return;
-          }
-
-          // Log significant events
-          if (event.type === 'tool_start') {
-            fastify.log.info({ requestId, tool: event.tool }, 'Agent calling tool');
-          } else if (event.type === 'tool_end') {
-            fastify.log.info({ requestId, tool: event.tool, success: (event.result as { success?: boolean })?.success }, 'Tool completed');
-          } else if (event.type === 'complete') {
-            fastify.log.info({
-              requestId,
-              status: event.eligibilityResult?.status,
-              inputTokens: event.usage?.inputTokens,
-              outputTokens: event.usage?.outputTokens,
-              cost: event.usage?.estimatedCost?.toFixed(4),
-              elapsed: Date.now() - startTime,
-            }, 'Agent completed');
-          } else if (event.type === 'error') {
-            fastify.log.error({ requestId, message: event.message }, 'Agent error');
-          }
-
-          yield { data: event };
+        if (clientDisconnected) {
+          fastify.log.info({ requestId, eventCount, elapsed: Date.now() - startTime }, 'Stopping agent - client disconnected');
+          break;
         }
 
-        fastify.log.info({ requestId, eventCount, elapsed: Date.now() - startTime }, 'Agent loop finished');
+        if (!sendEvent(event)) {
+          fastify.log.error({ requestId, eventCount }, 'Failed to send event');
+          break;
+        }
 
-      } catch (error) {
-        fastify.log.error({ requestId, error, elapsed: Date.now() - startTime }, 'Agent failed with exception');
-
-        // Send error event
-        yield {
-          data: {
-            type: 'error',
-            message: error instanceof Error ? error.message : 'An unexpected error occurred',
-          } as AgentEvent,
-        };
+        // Log significant events
+        if (event.type === 'tool_start') {
+          fastify.log.info({ requestId, tool: event.tool }, 'Agent calling tool');
+        } else if (event.type === 'tool_end') {
+          fastify.log.info({ requestId, tool: event.tool, success: (event.result as { success?: boolean })?.success }, 'Tool completed');
+        } else if (event.type === 'complete') {
+          fastify.log.info({
+            requestId,
+            status: event.eligibilityResult?.status,
+            inputTokens: event.usage?.inputTokens,
+            outputTokens: event.usage?.outputTokens,
+            cost: event.usage?.estimatedCost?.toFixed(4),
+            elapsed: Date.now() - startTime,
+          }, 'Agent completed');
+        } else if (event.type === 'error') {
+          fastify.log.error({ requestId, message: event.message }, 'Agent error');
+        }
       }
+
+      fastify.log.info({ requestId, eventCount, elapsed: Date.now() - startTime }, 'Agent loop finished');
+
+    } catch (error) {
+      fastify.log.error({ requestId, error, elapsed: Date.now() - startTime }, 'Agent failed with exception');
+
+      if (!clientDisconnected) {
+        sendEvent({
+          type: 'error',
+          message: error instanceof Error ? error.message : 'An unexpected error occurred',
+        });
+      }
+    } finally {
+      // End the response
+      reply.raw.end();
     }
-
-    // CRITICAL: Set headers to disable proxy buffering (Fly.io, nginx, etc.)
-    // Without these, the response may be buffered causing immediate client disconnect
-    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no'); // nginx
-    reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-
-    // Use @fastify/sse plugin to stream the events
-    // The plugin serializes data to JSON automatically
-    return reply.sse.send(eventStream());
   });
 
   /**
