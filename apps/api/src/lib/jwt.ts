@@ -150,14 +150,16 @@ export function getSessionCookieOptions(): {
 } {
   const expiresInSeconds = parseExpiresIn(process.env.JWT_EXPIRES_IN || '15m');
   const domain = process.env.SESSION_COOKIE_DOMAIN || undefined;
+  const isProduction = process.env.NODE_ENV === 'production';
 
   return {
     name: process.env.SESSION_COOKIE_NAME || 'eligibility_session',
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    // SameSite=Lax required for cookie to be sent after OAuth redirect
-    // Strict would block the cookie on the redirect from OAuth server
-    sameSite: 'lax',
+    secure: isProduction,
+    // SameSite=None required for cookies to be sent in cross-site iframe contexts
+    // (SMART on FHIR apps are embedded in EHR iframes from different domains).
+    // SameSite=None requires Secure=true (HTTPS), so use Lax in development.
+    sameSite: isProduction ? 'none' : 'lax',
     path: '/',
     // Domain MUST be set to parent domain for cookie to work across subdomains
     // e.g., ".eligibility.practicefusionpm.com" for both frontend and api subdomains
