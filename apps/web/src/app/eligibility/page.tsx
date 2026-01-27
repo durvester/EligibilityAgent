@@ -307,12 +307,11 @@ function EligibilityContent() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    // Use robust SSE client
-    // Call API directly instead of through Next.js rewrite proxy
-    // Next.js rewrites don't properly handle long-lived SSE streams
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    // Use robust SSE client via Route Handler (properly forwards cookies)
+    // Note: We previously called API directly, but that bypassed cookie forwarding
+    // Route Handlers (unlike rewrites) properly handle SSE streams
     await fetchSSE<AgentEvent>(
-      `${apiUrl}/agent/eligibility`,
+      '/api/agent/eligibility',
       {
         patient: state.patient,
         insurance: state.insurance,
