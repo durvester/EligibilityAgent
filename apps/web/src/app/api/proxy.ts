@@ -116,6 +116,8 @@ export async function proxySSE(
 ): Promise<Response> {
   const cookie = request.headers.get('cookie') || '';
   const contentType = request.headers.get('content-type') || 'application/json';
+  // CRITICAL: Forward Accept header - @fastify/sse requires this to set up SSE context
+  const accept = request.headers.get('accept') || 'text/event-stream';
 
   let body: string | undefined;
   try {
@@ -129,6 +131,7 @@ export async function proxySSE(
     headers: {
       'cookie': cookie,
       'content-type': contentType,
+      'accept': accept,
     },
     body,
   });

@@ -318,6 +318,12 @@ async function refreshPfToken(
   fhirBaseUrl: string
 ): Promise<string | null> {
   try {
+    // Validate inputs
+    if (!fhirBaseUrl || fhirBaseUrl.trim() === '') {
+      serviceLogger.error({ sessionId, fhirBaseUrl }, 'Cannot refresh PF token: FHIR base URL is empty');
+      return null;
+    }
+
     // Discover token endpoint
     const tokenEndpoint = await discoverTokenEndpoint(fhirBaseUrl);
 
@@ -366,6 +372,18 @@ async function refreshPfToken(
  * Discover token endpoint from FHIR server.
  */
 async function discoverTokenEndpoint(fhirBaseUrl: string): Promise<string> {
+  // Validate the URL before attempting to use it
+  if (!fhirBaseUrl || fhirBaseUrl.trim() === '') {
+    throw new Error('FHIR base URL is required for token endpoint discovery');
+  }
+
+  // Try to parse the URL to validate it
+  try {
+    new URL(fhirBaseUrl);
+  } catch {
+    throw new Error(`Invalid FHIR base URL: ${fhirBaseUrl}`);
+  }
+
   const baseUrl = fhirBaseUrl.replace(/\/$/, '');
 
   // Check cache first
