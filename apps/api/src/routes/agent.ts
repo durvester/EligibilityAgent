@@ -202,9 +202,15 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
       }
     }
 
+    // CRITICAL: Set headers to disable proxy buffering (Fly.io, nginx, etc.)
+    // Without these, the response may be buffered causing immediate client disconnect
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no'); // nginx
+    reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+
     // Use @fastify/sse plugin to stream the events
     // The plugin serializes data to JSON automatically
-    // Note: reply.sse.send() accepts AsyncIterable<SSEMessage> for streaming
     return reply.sse.send(eventStream());
   });
 
