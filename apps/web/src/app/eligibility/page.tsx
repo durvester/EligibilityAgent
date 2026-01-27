@@ -307,11 +307,14 @@ function EligibilityContent() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    // Use robust SSE client via Route Handler (properly forwards cookies)
-    // Note: We previously called API directly, but that bypassed cookie forwarding
-    // Route Handlers (unlike rewrites) properly handle SSE streams
+    // CRITICAL: Call API directly - Next.js Route Handlers buffer SSE, breaking streaming
+    // Cookies still work because:
+    // 1. Cookie domain is set to parent domain (.practicefusionpm.com)
+    // 2. credentials: 'include' is set in fetchSSE
+    // 3. CORS allows credentials from frontend origin
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
     await fetchSSE<AgentEvent>(
-      '/api/agent/eligibility',
+      `${apiUrl}/agent/eligibility`,
       {
         patient: state.patient,
         insurance: state.insurance,
