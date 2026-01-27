@@ -2,6 +2,7 @@
 
 import type { PatientInfo } from '@eligibility-agent/shared';
 import { User } from 'lucide-react';
+import { formatDate } from '../../../lib/format-date';
 
 interface PatientSummaryProps {
   patient: PatientInfo | null;
@@ -16,15 +17,6 @@ export default function PatientSummary({ patient }: PatientSummaryProps) {
       </section>
     );
   }
-
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  };
 
   // Format SSN for display - mask all but last 4
   const formatSSN = (ssn: string) => {

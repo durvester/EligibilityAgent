@@ -297,6 +297,7 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
         } else if (block.type === 'tool_use') {
           yield {
             type: 'tool_start',
+            toolUseId: block.id,
             tool: block.name,
             input: block.input as Record<string, unknown>,
           };
@@ -332,6 +333,7 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
 
           yield {
             type: 'tool_end',
+            toolUseId: block.id,
             tool: block.name,
             result,
           };

@@ -295,6 +295,7 @@ export interface AgentInput {
 export interface AgentStep {
   id: string;
   type: 'thinking' | 'tool_start' | 'tool_end' | 'text';
+  toolUseId?: string;  // Unique ID from Anthropic API for matching tool_start/tool_end
   tool?: string;
   input?: Record<string, unknown>;
   result?: unknown;
@@ -310,6 +311,7 @@ export interface AgentEvent {
   // For text events - agent's response text
   text?: string;
   // For tool events
+  toolUseId?: string;  // Unique ID from Anthropic API for matching tool_start/tool_end
   tool?: string;
   input?: Record<string, unknown>;
   result?: unknown;

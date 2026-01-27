@@ -29,6 +29,10 @@
     @apply bg-transparent text-neutral-600 hover:bg-neutral-100 focus:ring-neutral-300;
   }
 
+  .btn-outline {
+    @apply bg-transparent border border-current hover:bg-neutral-100 focus:ring-neutral-300;
+  }
+
   .card {
     @apply bg-white rounded-xl border border-neutral-100 shadow-sm;
   }

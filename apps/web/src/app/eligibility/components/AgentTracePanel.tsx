@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -182,6 +182,22 @@ export default function AgentTracePanel({
   compact = false,
 }: AgentTracePanelProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+
+  // Handle scroll to detect if user is at bottom
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    setIsAtBottom(scrollHeight - scrollTop - clientHeight < 50);
+  };
+
+  // Auto-scroll to bottom when new content arrives (if user is at bottom)
+  useEffect(() => {
+    if (isAtBottom && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps, streamingThinking, streamingText, isAtBottom]);
 
   // Group tool_start and tool_end steps
   const toolSteps: { start: AgentStep; end?: AgentStep }[] = [];
@@ -197,8 +213,11 @@ export default function AgentTracePanel({
       toolSteps.push(toolStep);
       orderedItems.push({ type: 'tool', ...toolStep });
     } else if (step.type === 'tool_end') {
-      // Find matching start
-      const matching = toolSteps.find(ts => ts.start.tool === step.tool && !ts.end);
+      // Find matching start by toolUseId (preferred) or fall back to tool name
+      const matching = toolSteps.find(ts =>
+        (step.toolUseId && ts.start.toolUseId === step.toolUseId && !ts.end) ||
+        (!step.toolUseId && ts.start.tool === step.tool && !ts.end)
+      );
       if (matching) {
         matching.end = step;
         // Update the ordered item
@@ -326,8 +345,24 @@ export default function AgentTracePanel({
         </button>
       </div>
 
-      <div className={`p-3 space-y-2 overflow-y-auto ${compact ? 'max-h-[300px]' : 'max-h-[500px]'}`}>
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className={`p-3 space-y-2 overflow-y-auto relative ${compact ? 'max-h-[300px]' : 'max-h-[500px]'}`}
+      >
         {panelContent}
+        {/* Jump to latest button - shown when scrolled up */}
+        {!isAtBottom && (
+          <button
+            onClick={() => {
+              scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+              setIsAtBottom(true);
+            }}
+            className="sticky bottom-2 left-1/2 -translate-x-1/2 btn btn-primary text-xs shadow-lg py-1.5 px-3"
+          >
+            Jump to latest
+          </button>
+        )}
       </div>
     </div>
   );

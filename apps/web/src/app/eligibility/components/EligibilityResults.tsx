@@ -17,6 +17,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import type { EligibilityResponse, AgentUsage, DiscrepancyReport, Discrepancy } from '@eligibility-agent/shared';
+import { formatDateOrNA } from '../../../lib/format-date';
 
 interface EligibilityResultsProps {
   result: EligibilityResponse;
@@ -32,19 +33,6 @@ interface EligibilityResultsProps {
 function formatCurrency(amount: number | undefined): string {
   if (amount === undefined) return 'N/A';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
-}
-
-function formatDate(date: string | undefined): string {
-  if (!date) return 'N/A';
-  try {
-    return new Date(date).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  } catch {
-    return date;
-  }
 }
 
 function StatusBadge({ status }: { status: EligibilityResponse['status'] }) {
@@ -277,13 +265,13 @@ function DetailsTab({ result }: { result: EligibilityResponse }) {
             {result.effectiveDate && (
               <div>
                 <span className="text-neutral-500">Effective: </span>
-                <span className="text-neutral-700">{formatDate(result.effectiveDate)}</span>
+                <span className="text-neutral-700">{formatDateOrNA(result.effectiveDate)}</span>
               </div>
             )}
             {result.terminationDate && (
               <div>
                 <span className="text-neutral-500">Ends: </span>
-                <span className="text-neutral-700">{formatDate(result.terminationDate)}</span>
+                <span className="text-neutral-700">{formatDateOrNA(result.terminationDate)}</span>
               </div>
             )}
           </div>
