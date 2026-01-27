@@ -203,6 +203,7 @@ function EligibilityContent() {
           newSteps.push({
             id: `${Date.now()}-tool-start`,
             type: 'tool_start',
+            toolUseId: event.toolUseId, // Required for matching with tool_end
             tool: event.tool,
             input: event.input,
             timestamp: Date.now(),

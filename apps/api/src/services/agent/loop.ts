@@ -476,10 +476,16 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
     }
 
     // Update AgentRun with final results
+    // Merge eligibility data, ensuring sourceAttribution from actual API call is preserved
+    const mergedEligibility = agentOutput?.eligibility || eligibilityResult;
+    if (mergedEligibility && eligibilityResult?.sourceAttribution) {
+      mergedEligibility.sourceAttribution = eligibilityResult.sourceAttribution;
+    }
+
     const finalOutput: AgentOutput = {
       summary: agentOutput?.summary,
       discrepancies: agentOutput?.discrepancies,
-      eligibility: agentOutput?.eligibility || eligibilityResult,
+      eligibility: mergedEligibility,
       rawResponse: agentOutput?.rawResponse || eligibilityResult?.rawResponse,
     };
     await updateAgentRun('completed', finalOutput);
