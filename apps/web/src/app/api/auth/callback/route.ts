@@ -54,13 +54,6 @@ export async function POST(request: Request) {
       // Note: domain is intentionally omitted - let browser use request origin
     });
 
-    console.log('[AUTH CALLBACK] Cookie set successfully:', {
-      name: opts.name || 'eligibility_session',
-      hasToken: !!data._sessionToken,
-      tokenLength: data._sessionToken?.length,
-      maxAge: opts.maxAge || 900,
-    });
-
     // Remove internal fields from response to client
     const { _sessionToken, _cookieOptions, ...clientData } = data;
 

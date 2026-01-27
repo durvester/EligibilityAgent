@@ -49,25 +49,17 @@ export interface CreateSessionInput {
 export async function createSession(
   input: CreateSessionInput
 ): Promise<{ sessionId: string; internalJwt: string; expiresAt: Date }> {
-  // Sign internal JWT first to get the jti
-  const { token, jti, expiresAt } = await signInternalJwt({
-    sessionId: '', // Placeholder - will update after creating session
-    tenantId: input.tenantId,
-    userFhirId: input.userFhirId,
-    userName: input.userName,
-  });
-
   // Calculate PF token expiration
   const pfTokenExpiresAt = new Date(Date.now() + input.pfExpiresIn * 1000);
 
-  // Create session in database
+  // Create session in database first (we'll update the JWT ID after signing)
   const session = await prisma.session.create({
     data: {
       tenantId: input.tenantId,
       userFhirId: input.userFhirId,
       userName: input.userName,
-      internalJwtId: jti,
-      internalJwtExpiresAt: expiresAt,
+      internalJwtId: 'pending', // Placeholder - updated after JWT is signed
+      internalJwtExpiresAt: new Date(), // Placeholder - updated after JWT is signed
       pfAccessTokenEncrypted: encrypt(input.pfAccessToken),
       pfRefreshTokenEncrypted: input.pfRefreshToken
         ? encrypt(input.pfRefreshToken)
@@ -78,24 +70,24 @@ export async function createSession(
     },
   });
 
-  // Now sign the real JWT with the actual session ID
-  const { token: finalToken, expiresAt: finalExpiresAt } = await signInternalJwt({
+  // Now sign the JWT with the real session ID
+  const { token, jti, expiresAt } = await signInternalJwt({
     sessionId: session.id,
     tenantId: input.tenantId,
     userFhirId: input.userFhirId,
     userName: input.userName,
   });
 
-  // Update session with the correct JWT ID
+  // Update session with the actual JWT ID from the token we're returning
   await prisma.session.update({
     where: { id: session.id },
     data: {
       internalJwtId: jti,
-      internalJwtExpiresAt: finalExpiresAt,
+      internalJwtExpiresAt: expiresAt,
     },
   });
 
-  // Cache session info in Redis for fast lookups
+  // Cache session info in Redis using the correct jti
   await cacheSet(CacheKeys.session(jti), {
     id: session.id,
     tenantId: input.tenantId,
@@ -108,12 +100,13 @@ export async function createSession(
     sessionId: session.id,
     tenantId: input.tenantId,
     userFhirId: input.userFhirId,
+    jti,
   }, 'Session created');
 
   return {
     sessionId: session.id,
-    internalJwt: finalToken,
-    expiresAt: finalExpiresAt,
+    internalJwt: token,
+    expiresAt,
   };
 }
 

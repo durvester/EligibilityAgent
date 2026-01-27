@@ -15,16 +15,6 @@ function getApiUrl(): string {
   return apiUrl;
 }
 
-// Debug logging for cookie flow
-function debugLog(context: string, data: Record<string, unknown>): void {
-  if (process.env.NODE_ENV === 'development' || process.env.DEBUG_PROXY === 'true') {
-    console.log(`[PROXY DEBUG] ${context}:`, JSON.stringify(data, null, 2));
-  } else {
-    // In production, log to stdout for Fly.io logs
-    console.log(`[PROXY] ${context}:`, JSON.stringify(data));
-  }
-}
-
 /**
  * Forward a request to the backend API.
  * Does NOT follow redirects - returns them to the browser.
@@ -36,13 +26,6 @@ export async function proxyRequest(
   const method = request.method;
   const cookie = request.headers.get('cookie') || '';
   const contentType = request.headers.get('content-type') || 'application/json';
-
-  debugLog(`${method} ${path} - incoming request`, {
-    hasCookie: !!cookie,
-    cookieLength: cookie.length,
-    // Only log first 50 chars of cookie for security
-    cookiePreview: cookie ? cookie.substring(0, 50) + '...' : '(none)',
-  });
 
   const headers: Record<string, string> = {
     'cookie': cookie,
@@ -64,17 +47,7 @@ export async function proxyRequest(
     }
   }
 
-  const apiUrl = getApiUrl();
-  const fullUrl = `${apiUrl}${path}`;
-
-  debugLog(`${method} ${path} - proxying to`, { fullUrl });
-
-  const response = await fetch(fullUrl, fetchOptions);
-
-  debugLog(`${method} ${path} - response status`, {
-    status: response.status,
-    statusText: response.statusText,
-  });
+  const response = await fetch(`${getApiUrl()}${path}`, fetchOptions);
 
   // Build response headers
   const responseHeaders = new Headers();
@@ -91,20 +64,13 @@ export async function proxyRequest(
     responseHeaders.set('location', location);
   }
 
-  // Forward Set-Cookie headers - CRITICAL for auth flow
-  // Try getSetCookie() first (Node.js 18.14+), then fall back to get()
+  // Forward Set-Cookie headers (multiple methods for compatibility)
   let setCookieHeaders: string[] = [];
 
-  // Method 1: getSetCookie() - preferred, returns array
   if (typeof response.headers.getSetCookie === 'function') {
     setCookieHeaders = response.headers.getSetCookie();
-    debugLog(`${method} ${path} - getSetCookie() result`, {
-      count: setCookieHeaders.length,
-      cookies: setCookieHeaders.map(c => c.substring(0, 80) + '...'),
-    });
   }
 
-  // Method 2: Iterate all headers (some environments need this)
   if (setCookieHeaders.length === 0) {
     const allSetCookies: string[] = [];
     response.headers.forEach((value, key) => {
@@ -114,35 +80,19 @@ export async function proxyRequest(
     });
     if (allSetCookies.length > 0) {
       setCookieHeaders = allSetCookies;
-      debugLog(`${method} ${path} - forEach() found set-cookie`, {
-        count: allSetCookies.length,
-      });
     }
   }
 
-  // Method 3: Raw header get (last resort, may miss multiple cookies)
   if (setCookieHeaders.length === 0) {
     const setCookie = response.headers.get('set-cookie');
     if (setCookie) {
       setCookieHeaders = [setCookie];
-      debugLog(`${method} ${path} - get('set-cookie') fallback`, {
-        found: true,
-        preview: setCookie.substring(0, 80) + '...',
-      });
     }
   }
 
-  // Append all found Set-Cookie headers
   for (const c of setCookieHeaders) {
     responseHeaders.append('set-cookie', c);
   }
-
-  debugLog(`${method} ${path} - final response headers`, {
-    hasSetCookie: setCookieHeaders.length > 0,
-    setCookieCount: setCookieHeaders.length,
-    contentType: respContentType,
-    hasLocation: !!location,
-  });
 
   // Get response body (empty for redirects)
   let body: string | null = null;
@@ -167,12 +117,6 @@ export async function proxySSE(
   const cookie = request.headers.get('cookie') || '';
   const contentType = request.headers.get('content-type') || 'application/json';
 
-  debugLog(`SSE ${path} - incoming request`, {
-    hasCookie: !!cookie,
-    cookieLength: cookie.length,
-    cookiePreview: cookie ? cookie.substring(0, 50) + '...' : '(none)',
-  });
-
   let body: string | undefined;
   try {
     body = await request.text();
@@ -180,12 +124,7 @@ export async function proxySSE(
     // No body
   }
 
-  const apiUrl = getApiUrl();
-  const fullUrl = `${apiUrl}${path}`;
-
-  debugLog(`SSE ${path} - proxying to`, { fullUrl });
-
-  const response = await fetch(fullUrl, {
+  const response = await fetch(`${getApiUrl()}${path}`, {
     method: 'POST',
     headers: {
       'cookie': cookie,
@@ -194,17 +133,8 @@ export async function proxySSE(
     body,
   });
 
-  debugLog(`SSE ${path} - response status`, {
-    status: response.status,
-    statusText: response.statusText,
-  });
-
   if (!response.ok) {
-    const errorBody = await response.text();
-    debugLog(`SSE ${path} - error response`, {
-      body: errorBody.substring(0, 200),
-    });
-    return new Response(errorBody, {
+    return new Response(await response.text(), {
       status: response.status,
       statusText: response.statusText,
       headers: {
