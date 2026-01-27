@@ -63,11 +63,24 @@ export async function sessionMiddleware(
 
   // Get cookie header
   const cookieHeader = request.headers.cookie;
+  const cookieName = getCookieName();
   const cookies = parseCookies(cookieHeader);
-  const token = cookies[getCookieName()];
+  const token = cookies[cookieName];
+
+  // Log cookie state for debugging (info level so it shows in production)
+  serviceLogger.info({
+    path: request.url,
+    hasCookieHeader: !!cookieHeader,
+    cookieHeaderLength: cookieHeader?.length || 0,
+    cookieName,
+    hasToken: !!token,
+    tokenLength: token?.length || 0,
+    tokenPreview: token ? token.substring(0, 30) + '...' : '(none)',
+    parsedCookieKeys: Object.keys(cookies),
+  }, 'Session middleware - cookie check');
 
   if (!token) {
-    serviceLogger.debug({ path: request.url }, 'No session cookie present');
+    serviceLogger.info({ path: request.url, cookieName }, 'No session cookie present');
     return;
   }
 
@@ -77,16 +90,16 @@ export async function sessionMiddleware(
 
     if (session) {
       request.session = session;
-      serviceLogger.debug({
+      serviceLogger.info({
         path: request.url,
         sessionId: session.id,
         tenantId: session.tenantId,
-      }, 'Session validated');
+      }, 'Session validated successfully');
     } else {
-      serviceLogger.debug({ path: request.url }, 'Session not found or revoked');
+      serviceLogger.info({ path: request.url }, 'Session not found or revoked');
     }
   } catch (error) {
-    serviceLogger.debug(
+    serviceLogger.info(
       { error: error instanceof Error ? error.message : 'Unknown', path: request.url },
       'Session validation failed'
     );
