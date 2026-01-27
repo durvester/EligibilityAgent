@@ -109,6 +109,7 @@ export async function proxyRequest(
 
 /**
  * Proxy a streaming SSE response.
+ * Uses TransformStream to properly pipe data for Next.js Route Handlers.
  */
 export async function proxySSE(
   request: Request,
@@ -146,11 +147,42 @@ export async function proxySSE(
     });
   }
 
-  // Stream the SSE response
+  // Check if we have a body to stream
+  if (!response.body) {
+    return new Response('No response body', { status: 500 });
+  }
+
+  // Create a TransformStream to pipe data through
+  // This ensures Next.js properly handles the streaming
+  const { readable, writable } = new TransformStream();
+
+  // Pipe the response body to our transform stream
+  // This runs asynchronously and keeps the connection open
+  (async () => {
+    const reader = response.body!.getReader();
+    const writer = writable.getWriter();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        await writer.write(value);
+      }
+    } catch (error) {
+      console.error('SSE proxy pipe error:', error);
+    } finally {
+      writer.close();
+    }
+  })();
+
+  // Build response headers
   const responseHeaders = new Headers();
   responseHeaders.set('content-type', 'text/event-stream');
-  responseHeaders.set('cache-control', 'no-cache');
+  responseHeaders.set('cache-control', 'no-cache, no-transform');
   responseHeaders.set('connection', 'keep-alive');
+  responseHeaders.set('x-accel-buffering', 'no'); // Disable nginx buffering
 
   // Forward Set-Cookie if present
   let setCookieHeaders: string[] = [];
@@ -161,7 +193,7 @@ export async function proxySSE(
     responseHeaders.append('set-cookie', c);
   }
 
-  return new Response(response.body, {
+  return new Response(readable, {
     status: response.status,
     headers: responseHeaders,
   });
