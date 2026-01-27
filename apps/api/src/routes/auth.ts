@@ -415,7 +415,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         userFhirId,
       }, 'Session created');
 
-      // Return tenant/user info - NOT tokens
+      // Return tenant/user info AND session token for Route Handler to set cookie
+      // The token is returned in body because Set-Cookie header forwarding through
+      // Next.js Route Handlers is unreliable in Node.js fetch
       return {
         success: true,
         tenantId: tenant.id,
@@ -425,6 +427,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         patientId: tokenData.patient,
         fhirBaseUrl: launchState.iss,
         expiresAt: expiresAt.toISOString(),
+        // Session token for Route Handler to set as cookie
+        _sessionToken: internalJwt,
+        _cookieOptions: cookieOptions,
       };
     } catch (error) {
       fastify.log.error(error, 'Token exchange failed');
@@ -532,7 +537,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    // Set new cookie
+    // Set new cookie (backup - Route Handler also sets cookie from body)
     const cookieOptions = getSessionCookieOptions();
     reply.setCookie(cookieOptions.name, result.internalJwt, {
       httpOnly: cookieOptions.httpOnly,
@@ -543,9 +548,12 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       maxAge: cookieOptions.maxAge,
     });
 
+    // Return token in body for Route Handler to set as cookie
     return {
       success: true,
       expiresAt: result.expiresAt.toISOString(),
+      _sessionToken: result.internalJwt,
+      _cookieOptions: cookieOptions,
     };
   });
 };
