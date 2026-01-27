@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 See `SPECIFICATION.md` for detailed technical documentation.
-See `.claude/rules/project-rules.md` for mandatory coding rules.
+See `.claude/rules/project-rules.md` for mandatory coding rules (tenant isolation, no fallbacks, etc.).
 
 ---
 
@@ -15,7 +15,7 @@ pnpm dev              # Start both apps (web :3000, api :3001)
 pnpm dev:web          # Frontend only
 pnpm dev:api          # Backend only
 pnpm build            # Build all packages
-pnpm test             # Run tests
+pnpm test             # Run tests (run pnpm build first if shared types changed)
 pnpm lint             # Run ESLint
 pnpm format           # Format with Prettier
 pnpm db:generate      # Generate Prisma client
@@ -56,12 +56,14 @@ fly.web.toml          # Fly.io Web config
 
 ### Agent Flow
 1. Frontend submits patient/insurance/provider data to `/api/agent/eligibility`
-2. Agent validates NPI via NPPES (Redis cached)
+2. Agent (claude-sonnet-4-20250514) validates NPI via NPPES (Redis cached)
 3. Agent determines Stedi payer ID (from memory, search, or discovery)
-4. **Critical**: If using discovery, agent MUST then call `check_eligibility`
-5. Agent submits eligibility check to Stedi
-6. Agent generates structured JSON output: summary, discrepancies, eligibility data, raw response
-7. Results streamed back via SSE
+4. Agent submits eligibility check to Stedi
+5. Agent generates structured JSON output: summary, discrepancies, eligibility data, raw response
+6. Results streamed back via SSE (max 20 turns, max 10 Stedi calls)
+
+**CRITICAL: Discovery → Eligibility Rule**
+If agent calls `discover_insurance`, it MUST follow with `check_eligibility`. Discovery finds payer data; eligibility is the actual goal. Agent should never terminate after discovery alone.
 
 ---
 
@@ -77,9 +79,17 @@ NOT `Coverage.subscriberId` (contains garbage `\S\0\S\AT`)
 
 **OAuth Scopes**: Use `launch`, NOT `launch/patient`
 
-### Two-Token Authentication
+### Authentication & Token Management
 - **Internal JWT**: Short-lived (15 min), HttpOnly cookie, for API auth
-- **PF OAuth Tokens**: Encrypted in PostgreSQL, ONLY for FHIR calls
+- **PF OAuth Tokens**: Encrypted (AES-256-GCM) in PostgreSQL, ONLY for FHIR calls
+- **Token Retry**: FHIR proxy uses retry-on-401 - refresh PF token via stored `tokenEndpoint`, retry once. See `refreshAndRetry()` in `fhir.ts`.
+- **Frontend stores nothing** - all auth via cookies with `credentials: 'include'`
+
+### HIPAA Audit Logging
+Audit writes are fire-and-forget - never block requests:
+```typescript
+auditRequest(request, 'READ_FHIR', resourceId);  // No await
+```
 
 ### SSE Streaming
 - Agent endpoint uses `@fastify/sse` plugin
