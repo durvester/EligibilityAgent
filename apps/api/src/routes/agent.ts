@@ -84,7 +84,7 @@ const agentRoutes: FastifyPluginAsync = async (fastify) => {
    * - Patient first name, last name, DOB
    * - Provider NPI OR provider name (first + last)
    */
-  fastify.post<{ Body: EligibilityAgentBody }>('/eligibility', async (request, reply) => {
+  fastify.post<{ Body: EligibilityAgentBody }>('/eligibility', { sse: true }, async (request, reply) => {
     const requestId = `req-${Date.now()}`;
     const startTime = Date.now();
 
