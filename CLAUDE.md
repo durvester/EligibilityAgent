@@ -137,6 +137,40 @@ auditRequest(request, 'READ_FHIR', resourceId);  // No await
 1. Add to `packages/shared/src/types/index.ts`
 2. Re-export from `packages/shared/src/index.ts`
 
+### Excalidraw Diagrams
+This repo uses Obsidian with the Excalidraw plugin for architecture diagrams.
+
+1. Create files in `Excalidraw/` folder with `.excalidraw` extension
+2. Use pure JSON format (not `.excalidraw.md` markdown wrapper)
+3. Basic structure:
+```json
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "unique-id",
+      "type": "rectangle",  // or "text", "arrow", "ellipse", "line"
+      "x": 100, "y": 100,
+      "width": 180, "height": 70,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "#a5d8ff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",  // or "dashed" for external APIs
+      "roughness": 1,
+      "roundness": { "type": 3 },
+      "boundElements": [{ "type": "text", "id": "text-id" }]
+    }
+  ],
+  "appState": { "viewBackgroundColor": "#ffffff" },
+  "files": {}
+}
+```
+4. Color conventions: Blue=Frontend, Green=API, Yellow=Agent, Purple=DB, Red=Cache, Gray=External
+5. Use `strokeStyle: "dashed"` for external API connections
+
 ---
 
 ## API Patterns
