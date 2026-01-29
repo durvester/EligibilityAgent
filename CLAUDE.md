@@ -161,25 +161,6 @@ data: {"type":"complete","eligibilityResult":{...},"summary":"...","discrepancie
 
 ---
 
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API |
-| `STEDI_API_KEY` | Yes | Stedi eligibility |
-| `PF_CLIENT_ID` | Yes | Practice Fusion OAuth |
-| `PF_CLIENT_SECRET` | Yes | Practice Fusion OAuth |
-| `PF_SCOPES` | Yes | OAuth scopes (use `launch` not `launch/patient`) |
-| `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `ENCRYPTION_KEY` | Yes | Token encryption (`openssl rand -base64 32`) |
-| `JWT_SECRET` | Yes | JWT signing (`openssl rand -base64 64`) |
-| `UPSTASH_REDIS_URL` | Yes | Upstash Redis REST URL |
-| `UPSTASH_REDIS_TOKEN` | Yes | Upstash Redis token |
-| `NEXT_PUBLIC_APP_URL` | Yes | Frontend URL |
-| `NEXT_PUBLIC_API_URL` | Yes | Backend URL for SSE |
-
----
-
 ## Deployment
 
 Deployed to Fly.io with auto-deploy via GitHub Actions on push to `main`.
@@ -200,9 +181,6 @@ flyctl deploy --config fly.api.toml --remote-only
 
 ## PR Checklist
 
-1. `pnpm build` passes
-2. `pnpm test` passes
-3. No new `console.log` statements (use `fastify.log`)
-4. No PHI in logs
-5. Add tests for new functionality
-6. Database queries filter by `tenantId` from session
+1. `pnpm build` and `pnpm test` pass
+2. No `console.log` statements (use `fastify.log`)
+3. Database queries filter by `tenantId` from session
