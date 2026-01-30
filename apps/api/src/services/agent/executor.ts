@@ -223,6 +223,7 @@ async function executeCheckEligibility(input: Record<string, unknown>): Promise<
       benefits: result.benefits?.slice(0, 10), // Limit to keep response manageable
       warnings: result.warnings,
       rawResponse: result.rawResponse, // Full Stedi 271 response for agent analysis
+      sourceAttribution: result.sourceAttribution, // Pass through for UI display
     },
   };
 }
