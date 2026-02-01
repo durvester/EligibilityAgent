@@ -1,13 +1,13 @@
 # Eligibility Agent
 
-SMART on FHIR application for insurance eligibility verification with Claude AI Agent.
+A SMART on FHIR application for insurance eligibility verification, powered by Claude AI.
 
 ## Overview
 
-Practice Fusion Eligibility Agent is a healthcare application that:
+Eligibility Agent is a healthcare application that:
 
-1. Launches from Practice Fusion EHR via SMART on FHIR
-2. Uses Claude AI Agent to intelligently map messy payer data to correct Stedi payer IDs
+1. Launches from any FHIR-compliant EHR via SMART on FHIR
+2. Uses a Claude AI agent to intelligently map payer data to correct Stedi payer IDs
 3. Verifies insurance eligibility via Stedi X12 270/271
 4. Generates summaries with source attribution and discrepancy detection
 5. Stores results with HIPAA-compliant audit logging
@@ -25,21 +25,14 @@ EligibilityAgent/
 └── turbo.json        # Turborepo config
 ```
 
-## Current Status
+## Features
 
-### Completed (Phases 1-4)
-- **Tenant-centric architecture** - Issuer (FHIR base URL) = Practice = Tenant
-- **Session management** - Internal JWTs for API auth, encrypted PF tokens for FHIR
-- **Token refresh** - Retry-on-401 pattern with automatic token refresh
-- **Redis caching** - Upstash Redis for NPI lookups and SMART config
-- **HIPAA audit logging** - Fire-and-forget audit trail for all PHI access
-- **Agent output storage** - Final results persisted to PostgreSQL
-- **Deployment** - Fly.io with auto-deploy via GitHub Actions
-
-### Pending (Phases 5-7)
-- Automated testing (Jest + Playwright E2E)
-- Code quality improvements (ESLint strict mode, type safety)
-- Monitoring & alerting (Grafana, Fly.io metrics)
+- **SMART on FHIR Integration** - Launches in EHR context with patient/coverage data
+- **AI-Powered Payer Mapping** - Claude agent handles messy payer names and finds correct Stedi IDs
+- **Insurance Discovery** - Falls back to demographic-based discovery when payer mapping fails
+- **Discrepancy Detection** - Compares EHR data against payer response
+- **Source Attribution** - Every data point linked to its source (EHR or payer)
+- **Audit Logging** - HIPAA-compliant logging of all PHI access
 
 ## Getting Started
 
@@ -48,7 +41,7 @@ EligibilityAgent/
 - Node.js >= 20.0.0
 - pnpm >= 9.0.0
 - PostgreSQL database
-- Upstash Redis account
+- Redis instance (Upstash recommended)
 
 ### Installation
 
@@ -82,11 +75,8 @@ pnpm dev:api   # API at http://localhost:3001
 
 # Run tests
 pnpm test
-```
 
-### Build
-
-```bash
+# Build
 pnpm build
 ```
 
@@ -94,33 +84,41 @@ pnpm build
 
 See `.env.example` for all required variables:
 
-### Required
-- `ANTHROPIC_API_KEY` - Claude API key
-- `STEDI_API_KEY` - Stedi eligibility API key
-- `PF_CLIENT_ID` - Practice Fusion OAuth client ID
-- `PF_CLIENT_SECRET` - Practice Fusion OAuth client secret
-- `PF_SCOPES` - OAuth scopes (use `launch` not `launch/patient`)
+### Core Services
+- `ANTHROPIC_API_KEY` - Claude API key from [Anthropic](https://console.anthropic.com/)
+- `STEDI_API_KEY` - Stedi eligibility API key from [Stedi](https://www.stedi.com/)
+
+### EHR OAuth (SMART on FHIR)
+- `EHR_CLIENT_ID` - OAuth client ID from your EHR vendor
+- `EHR_CLIENT_SECRET` - OAuth client secret
+- `EHR_SCOPES` - OAuth scopes (typically `launch openid fhirUser`)
+
+### Database & Cache
 - `DATABASE_URL` - PostgreSQL connection string
+- `UPSTASH_REDIS_URL` - Redis REST URL
+- `UPSTASH_REDIS_TOKEN` - Redis token
+
+### Security
 - `ENCRYPTION_KEY` - Token encryption key (`openssl rand -base64 32`)
 - `JWT_SECRET` - Internal JWT signing key (`openssl rand -base64 64`)
-- `UPSTASH_REDIS_URL` - Upstash Redis REST URL
-- `UPSTASH_REDIS_TOKEN` - Upstash Redis token
+
+### URLs
 - `NEXT_PUBLIC_APP_URL` - Frontend URL
 - `NEXT_PUBLIC_API_URL` - Backend URL (for SSE)
 
-## Authentication Architecture
+## Authentication Flow
 
 ```
-Browser                    Our API                     Practice Fusion
-   │                          │                              │
-   │── Cookie (internal JWT)─▶│                              │
-   │                          │── Decrypt PF token from DB ─▶│
-   │                          │◀── FHIR data ────────────────│
-   │◀── Response ─────────────│                              │
+Browser                    API                         EHR FHIR Server
+   │                        │                                │
+   │── Cookie (JWT) ───────▶│                                │
+   │                        │── Decrypt OAuth token ────────▶│
+   │                        │◀── FHIR data ──────────────────│
+   │◀── Response ───────────│                                │
 ```
 
 - **Internal JWT** - Short-lived (15 min), stored in HttpOnly cookie
-- **PF OAuth tokens** - Encrypted in PostgreSQL, auto-refreshed on 401
+- **EHR OAuth tokens** - Encrypted in PostgreSQL, auto-refreshed on 401
 - **Session** - Links JWT to tenant, user, and encrypted tokens
 
 ## Agent Workflow
@@ -128,7 +126,7 @@ Browser                    Our API                     Practice Fusion
 The Claude Agent orchestrates eligibility checks:
 
 1. Validates provider NPI via NPPES registry
-2. Maps Practice Fusion payer name to Stedi payer ID
+2. Maps EHR payer name to Stedi payer ID (search or discovery)
 3. Submits X12 270 eligibility request to Stedi
 4. Parses X12 271 response and detects discrepancies
 5. Generates summary with source attribution
@@ -139,39 +137,45 @@ The Claude Agent orchestrates eligibility checks:
 - Max 10 Stedi API calls per session
 - 2-minute timeout
 
-## Deployment
-
-Deployed to Fly.io with automatic CI/CD:
-
-| Component | URL |
-|-----------|-----|
-| Web | https://eligibility.practicefusionpm.com |
-| API | https://api.eligibility.practicefusionpm.com |
-
-```bash
-# View logs
-fly logs -a eligibility-api
-
-# Database console
-fly postgres connect -a eligibility-db
-```
-
 ## Tech Stack
 
 - **Frontend**: Next.js 14, React 18, Tailwind CSS
 - **Backend**: Fastify 5, Node.js
 - **Database**: PostgreSQL with Prisma ORM
-- **Cache**: Upstash Redis
-- **AI**: Claude Sonnet (Anthropic API)
+- **Cache**: Redis (Upstash)
+- **AI**: Claude Sonnet (Anthropic SDK)
 - **Build**: Turborepo, pnpm workspaces
 - **Deploy**: Fly.io, GitHub Actions
 
-## Documentation
+## Deployment
 
-- `SPECIFICATION.md` - Technical specification
-- `CLAUDE.md` - Claude Code guidance
-- `ROADMAP.md` - Feature roadmap
-- `CODE_AUDIT.md` - Security and quality audit
+This application can be deployed to Fly.io:
+
+```bash
+# Create apps
+fly apps create <your-api-app>
+fly apps create <your-web-app>
+
+# Create PostgreSQL
+fly postgres create --name <your-db-app>
+fly postgres attach <your-db-app> --app <your-api-app>
+
+# Set secrets
+fly secrets set ANTHROPIC_API_KEY=... --app <your-api-app>
+fly secrets set STEDI_API_KEY=... --app <your-api-app>
+# ... set all required secrets
+
+# Deploy
+flyctl deploy --config fly.api.toml --remote-only
+flyctl deploy --config fly.web.toml --remote-only
+```
+
+## Related Resources
+
+- [SMART on FHIR](https://docs.smarthealthit.org/) - App launch framework
+- [Stedi](https://www.stedi.com/) - X12 EDI APIs
+- [Anthropic](https://docs.anthropic.com/) - Claude AI
+- [NPPES NPI Registry](https://npiregistry.cms.hhs.gov/) - Provider lookup
 
 ## License
 

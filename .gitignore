@@ -34,6 +34,8 @@ secrets/
 
 # Documentation (internal/reference only)
 Documentation/
+*.md
+!README.md
 
 # OS
 .DS_Store
