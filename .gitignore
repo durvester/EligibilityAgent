@@ -36,6 +36,8 @@ secrets/
 Documentation/
 *.md
 !README.md
+Excalidraw/
+deploy/
 
 # OS
 .DS_Store
