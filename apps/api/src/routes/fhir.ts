@@ -159,7 +159,7 @@ function transformCoverage(fhir: FhirCoverage & {
     c.type?.coding?.some(coding => coding.code === 'group')
   );
 
-  // Practice Fusion stores member ID in extension: coverage-insured-unique-id
+  // Some EHRs store member ID in extension: coverage-insured-unique-id
   const memberIdExtension = fhir.extension?.find(
     ext => ext.url?.includes('coverage-insured-unique-id')
   );

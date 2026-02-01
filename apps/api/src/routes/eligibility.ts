@@ -22,9 +22,9 @@ const eligibilityRoutes: FastifyPluginAsync = async (fastify) => {
     try {
       // TODO: Implement actual EHR write-back
       // 1. Generate PDF summary
-      // 2. Upload PDF to Practice Fusion document API
-      // 3. Upload JSON to Practice Fusion document API
-      // 4. Update insurance record via Practice Fusion insurance API
+      // 2. Upload PDF to EHR document API
+      // 3. Upload JSON to EHR document API
+      // 4. Update insurance record via EHR insurance API
       // 5. Save to local database for audit
 
       fastify.log.info({ patientId, status: results.status }, 'Saving eligibility results');

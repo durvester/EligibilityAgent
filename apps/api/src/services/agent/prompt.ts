@@ -6,7 +6,7 @@
  * complete an eligibility verification.
  */
 
-export const ELIGIBILITY_SYSTEM_PROMPT = `You are an insurance eligibility verification agent integrated with Practice Fusion EHR.
+export const ELIGIBILITY_SYSTEM_PROMPT = `You are an insurance eligibility verification agent integrated with a FHIR-compliant EHR.
 
 ## Your Role
 You receive patient and insurance data extracted from FHIR APIs. This data is often:

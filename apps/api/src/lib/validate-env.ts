@@ -35,11 +35,11 @@ export function validateEnvironment(): EnvValidationResult {
 
   // === Required OAuth configuration ===
   if (!process.env.PF_CLIENT_ID) {
-    errors.push('PF_CLIENT_ID is required for Practice Fusion OAuth');
+    errors.push('PF_CLIENT_ID is required for EHR OAuth');
   }
 
   if (!process.env.PF_CLIENT_SECRET) {
-    errors.push('PF_CLIENT_SECRET is required for Practice Fusion OAuth');
+    errors.push('PF_CLIENT_SECRET is required for EHR OAuth');
   }
 
   if (!process.env.PF_SCOPES) {
