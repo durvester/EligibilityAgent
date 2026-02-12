@@ -21,6 +21,7 @@ import { cacheGet, cacheSet, CacheKeys, CacheTTL } from '../lib/redis.js';
 import { auditLogin, auditLogout } from '../services/audit-service.js';
 import { getRequiredEnv } from '../lib/validate-env.js';
 import { sessionMiddleware } from '../middleware/session.js';
+import { getCredentialsForIssuer } from '../services/ehr-credentials.js';
 
 interface LaunchQuery {
   iss: string;
@@ -51,6 +52,8 @@ interface LaunchState {
   authorizeUrl: string;
   tokenUrl: string;
   createdAt: number;
+  clientId: string;
+  clientSecret: string;
 }
 
 // In-memory state store (use Redis in production for multi-instance)
@@ -263,6 +266,22 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         tokenUrl: smartConfig.token_endpoint,
       }, 'SMART configuration discovered');
 
+      // Get EHR-specific OAuth credentials
+      let credentials;
+      try {
+        credentials = getCredentialsForIssuer(iss);
+      } catch (error) {
+        // NO credentials configured for this issuer - FAIL EXPLICITLY
+        fastify.log.error({ iss, error }, 'OAuth credentials not configured for issuer');
+        return reply.status(400).send({
+          success: false,
+          error: {
+            code: 'CREDENTIALS_NOT_CONFIGURED',
+            message: error instanceof Error ? error.message : `OAuth credentials not configured for issuer: ${iss}`,
+          },
+        });
+      }
+
       // Generate state for CSRF protection
       const state = uuid();
       stateStore.set(state, {
@@ -271,6 +290,8 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         authorizeUrl: smartConfig.authorization_endpoint,
         tokenUrl: smartConfig.token_endpoint,
         createdAt: Date.now(),
+        clientId: credentials.clientId,
+        clientSecret: credentials.clientSecret,
       });
 
       // Clean up old states (older than 10 minutes)
@@ -281,15 +302,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      // Build authorization URL - NO FALLBACK for required env vars
+      // Build authorization URL with EHR-specific credentials
       const appUrl = getRequiredEnv('NEXT_PUBLIC_APP_URL');
       const redirectUri = `${appUrl}/callback`;
 
       const authorizeUrl = new URL(smartConfig.authorization_endpoint);
       authorizeUrl.searchParams.set('response_type', 'code');
-      authorizeUrl.searchParams.set('client_id', getRequiredEnv('PF_CLIENT_ID'));
+      authorizeUrl.searchParams.set('client_id', credentials.clientId);
       authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-      authorizeUrl.searchParams.set('scope', getRequiredEnv('PF_SCOPES'));
+      authorizeUrl.searchParams.set('scope', credentials.scopes);
       authorizeUrl.searchParams.set('state', state);
       authorizeUrl.searchParams.set('launch', launch);
       authorizeUrl.searchParams.set('aud', iss);
@@ -347,15 +368,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     const redirectUri = `${appUrl}/callback`;
 
     try {
-      // Exchange code for token
+      // Exchange code for token using credentials from launch state
       const tokenResponse = await axios.post(
         launchState.tokenUrl,
         new URLSearchParams({
           grant_type: 'authorization_code',
           code,
           redirect_uri: redirectUri,
-          client_id: getRequiredEnv('PF_CLIENT_ID'),
-          client_secret: getRequiredEnv('PF_CLIENT_SECRET'),
+          client_id: launchState.clientId,
+          client_secret: launchState.clientSecret,
         }),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -382,6 +403,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       // Get or create tenant from issuer
       const tenant = await getOrCreateTenant(launchState.iss, tokenData.access_token);
 
+      // Get EHR identifier for token refresh
+      const credentials = getCredentialsForIssuer(launchState.iss);
+
       // Create session
       const { sessionId, internalJwt } = await createSession({
         tenantId: tenant.id,
@@ -393,6 +417,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         pfRefreshToken: tokenData.refresh_token || null,
         pfExpiresIn: tokenData.expires_in || 3600,
         tokenEndpoint: launchState.tokenUrl, // Store for token refresh
+        ehrIdentifier: credentials.ehrName, // Store EHR identifier for token refresh
       });
 
       // Audit the login
@@ -473,15 +498,15 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     const redirectUri = `${appUrl}/callback`;
 
     try {
-      // Exchange code for token
+      // Exchange code for token using credentials from launch state
       const tokenResponse = await axios.post(
         launchState.tokenUrl,
         new URLSearchParams({
           grant_type: 'authorization_code',
           code,
           redirect_uri: redirectUri,
-          client_id: getRequiredEnv('PF_CLIENT_ID'),
-          client_secret: getRequiredEnv('PF_CLIENT_SECRET'),
+          client_id: launchState.clientId,
+          client_secret: launchState.clientSecret,
         }),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -511,6 +536,9 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       // Get or create tenant from issuer
       const tenant = await getOrCreateTenant(launchState.iss, tokenData.access_token);
 
+      // Get EHR identifier for token refresh
+      const credentials = getCredentialsForIssuer(launchState.iss);
+
       // Create session
       const { sessionId, internalJwt, expiresAt } = await createSession({
         tenantId: tenant.id,
@@ -522,6 +550,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         pfRefreshToken: tokenData.refresh_token || null,
         pfExpiresIn: tokenData.expires_in || 3600,
         tokenEndpoint: launchState.tokenUrl, // Store for token refresh
+        ehrIdentifier: credentials.ehrName, // Store EHR identifier for token refresh
       });
 
       // Audit the login

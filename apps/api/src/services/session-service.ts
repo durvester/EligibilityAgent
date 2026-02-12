@@ -38,6 +38,7 @@ export interface CreateSessionInput {
   pfRefreshToken: string | null;
   pfExpiresIn: number; // seconds
   tokenEndpoint: string; // OAuth token endpoint for refresh
+  ehrIdentifier: string; // EHR system identifier (e.g., 'PF', 'VERADIGM')
 }
 
 /**
@@ -65,6 +66,7 @@ export async function createSession(
         : null,
       pfTokenExpiresAt,
       tokenEndpoint: input.tokenEndpoint, // Store for token refresh
+      ehrIdentifier: input.ehrIdentifier, // Store EHR identifier for token refresh
       patientId: input.patientId,
       scope: input.scope,
     },
@@ -193,6 +195,9 @@ export async function getTokenEndpoint(sessionId: string): Promise<string | null
  * Refresh PF access token using the refresh token.
  * Called when a FHIR request returns 401.
  *
+ * Uses EHR-specific credentials based on ehrIdentifier stored in session.
+ * NO FALLBACKS - if ehrIdentifier is missing or credentials not found, fails explicitly.
+ *
  * @param sessionId - Session ID
  * @returns New access token or null if refresh failed
  */
@@ -202,20 +207,58 @@ export async function refreshPfAccessToken(sessionId: string): Promise<string | 
   });
 
   if (!session || session.revoked || !session.pfRefreshTokenEncrypted || !session.tokenEndpoint) {
-    serviceLogger.warn({ sessionId, hasRefreshToken: !!session?.pfRefreshTokenEncrypted, hasTokenEndpoint: !!session?.tokenEndpoint }, 'Cannot refresh PF token');
+    serviceLogger.warn(
+      {
+        sessionId,
+        hasRefreshToken: !!session?.pfRefreshTokenEncrypted,
+        hasTokenEndpoint: !!session?.tokenEndpoint,
+      },
+      'Cannot refresh OAuth token - missing required fields'
+    );
+    return null;
+  }
+
+  // REQUIRE ehrIdentifier - no fallbacks
+  if (!session.ehrIdentifier) {
+    serviceLogger.error(
+      { sessionId },
+      'Cannot refresh OAuth token - ehrIdentifier is null. Session created before multi-EHR support. User must re-login.'
+    );
+    return null;
+  }
+
+  // Get EHR-specific credentials from environment
+  const clientId = process.env[`${session.ehrIdentifier}_CLIENT_ID`];
+  const clientSecret = process.env[`${session.ehrIdentifier}_CLIENT_SECRET`];
+
+  if (!clientId || !clientSecret) {
+    serviceLogger.error(
+      {
+        sessionId,
+        ehrIdentifier: session.ehrIdentifier,
+        missingClientId: !clientId,
+        missingClientSecret: !clientSecret,
+      },
+      'Cannot refresh OAuth token - EHR credentials not found in environment. User must re-login.'
+    );
     return null;
   }
 
   try {
     const refreshToken = decrypt(session.pfRefreshTokenEncrypted);
 
+    serviceLogger.info(
+      { sessionId, ehrIdentifier: session.ehrIdentifier },
+      'Refreshing OAuth token'
+    );
+
     const response = await axios.post(
       session.tokenEndpoint,
       new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: refreshToken,
-        client_id: process.env.PF_CLIENT_ID || '',
-        client_secret: process.env.PF_CLIENT_SECRET || '',
+        client_id: clientId,
+        client_secret: clientSecret,
       }),
       {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -239,12 +282,19 @@ export async function refreshPfAccessToken(sessionId: string): Promise<string | 
       },
     });
 
-    serviceLogger.info({ sessionId }, 'PF token refreshed successfully');
+    serviceLogger.info(
+      { sessionId, ehrIdentifier: session.ehrIdentifier },
+      'OAuth token refreshed successfully'
+    );
     return data.access_token;
   } catch (error) {
     serviceLogger.error(
-      { error: error instanceof Error ? error.message : 'Unknown', sessionId },
-      'PF token refresh failed'
+      {
+        error: error instanceof Error ? error.message : 'Unknown',
+        sessionId,
+        ehrIdentifier: session.ehrIdentifier,
+      },
+      'OAuth token refresh failed'
     );
     return null;
   }

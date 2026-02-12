@@ -47,6 +47,7 @@ model Session {
   pfRefreshTokenEncrypted String?   @map("pf_refresh_token_encrypted")
   pfTokenExpiresAt        DateTime  @map("pf_token_expires_at")
   tokenEndpoint           String?   @map("token_endpoint") // OAuth token endpoint for refresh
+  ehrIdentifier           String?   @map("ehr_identifier") // EHR system identifier (e.g., 'PF', 'VERADIGM') for token refresh
 
   patientId      String?  @map("patient_id")
   scope          String?

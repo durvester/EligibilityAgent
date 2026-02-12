@@ -11,6 +11,7 @@
  */
 
 import { serviceLogger } from './logger.js';
+import { validateEhrCredentials } from '../services/ehr-credentials.js';
 
 interface EnvValidationResult {
   valid: boolean;
@@ -34,20 +35,9 @@ export function validateEnvironment(): EnvValidationResult {
   }
 
   // === Required OAuth configuration ===
-  if (!process.env.PF_CLIENT_ID) {
-    errors.push('PF_CLIENT_ID is required for EHR OAuth');
-  }
-
-  if (!process.env.PF_CLIENT_SECRET) {
-    errors.push('PF_CLIENT_SECRET is required for EHR OAuth');
-  }
-
-  if (!process.env.PF_SCOPES) {
-    errors.push(
-      'PF_SCOPES is required. ' +
-        'Recommended: launch openid fhirUser offline_access patient/Patient.read patient/Coverage.read'
-    );
-  }
+  // Validate EHR credentials (at least one EHR must be configured)
+  const ehrErrors = validateEhrCredentials();
+  errors.push(...ehrErrors);
 
   // === Required database configuration ===
   if (!process.env.DATABASE_URL) {
