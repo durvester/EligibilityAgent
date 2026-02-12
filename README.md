@@ -27,6 +27,7 @@ EligibilityAgent/
 
 ## Features
 
+- **Multi-EHR Support** - Works with multiple EHR vendors (Practice Fusion, Veradigm, extensible to Epic/Cerner)
 - **SMART on FHIR Integration** - Launches in EHR context with patient/coverage data
 - **AI-Powered Payer Mapping** - Claude agent handles messy payer names and finds correct Stedi IDs
 - **Insurance Discovery** - Falls back to demographic-based discovery when payer mapping fails
@@ -88,10 +89,20 @@ See `.env.example` for all required variables:
 - `ANTHROPIC_API_KEY` - Claude API key from [Anthropic](https://console.anthropic.com/)
 - `STEDI_API_KEY` - Stedi eligibility API key from [Stedi](https://www.stedi.com/)
 
-### EHR OAuth (SMART on FHIR)
-- `EHR_CLIENT_ID` - OAuth client ID from your EHR vendor
-- `EHR_CLIENT_SECRET` - OAuth client secret
-- `EHR_SCOPES` - OAuth scopes (typically `launch openid fhirUser`)
+### EHR OAuth (SMART on FHIR) - Multi-EHR Support
+Supports multiple EHR vendors with automatic credential selection based on FHIR issuer URL.
+
+**Practice Fusion:**
+- `PF_CLIENT_ID` - OAuth client ID
+- `PF_CLIENT_SECRET` - OAuth client secret
+- `PF_SCOPES` - OAuth scopes (e.g., `launch openid fhirUser offline_access patient/Patient.read patient/Coverage.read`)
+
+**Veradigm/Allscripts:**
+- `VERADIGM_CLIENT_ID` - OAuth client ID
+- `VERADIGM_CLIENT_SECRET` - OAuth client secret
+- `VERADIGM_SCOPES` - OAuth scopes
+
+At least ONE EHR must be configured. Add more EHR systems by following the pattern in `apps/api/src/services/ehr-credentials.ts`.
 
 ### Database & Cache
 - `DATABASE_URL` - PostgreSQL connection string
