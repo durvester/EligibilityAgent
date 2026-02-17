@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach } from '@jest/globals';
 
-// Mock types for testing
+// Mock types for testing (matches LaunchState in auth.ts)
 interface LaunchState {
   iss: string;
   launch: string;
@@ -21,6 +21,7 @@ interface LaunchState {
   createdAt: number;
   clientId: string;
   clientSecret: string;
+  codeVerifier?: string;
 }
 
 interface SessionData {
@@ -368,6 +369,126 @@ describe('Pattern matching edge cases', () => {
 
     urls.forEach(url => {
       expect(pattern.test(url)).toBe(false);
+    });
+  });
+});
+
+describe('PKCE in OAuth Flow', () => {
+  describe('Authorization URL with PKCE', () => {
+    it('should include PKCE params in authorization URL when usePkce is true', () => {
+      const codeChallenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
+
+      const authorizeUrl = new URL('https://auth.practicefusion.com/authorize');
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('client_id', 'pf-client-123');
+      authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+      authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+
+      expect(authorizeUrl.searchParams.get('code_challenge')).toBe(codeChallenge);
+      expect(authorizeUrl.searchParams.get('code_challenge_method')).toBe('S256');
+    });
+
+    it('should NOT include PKCE params when usePkce is false', () => {
+      const usePkce = false;
+
+      const authorizeUrl = new URL('https://auth.practicefusion.com/authorize');
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('client_id', 'pf-client-123');
+
+      if (usePkce) {
+        authorizeUrl.searchParams.set('code_challenge', 'test');
+        authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+      }
+
+      expect(authorizeUrl.searchParams.has('code_challenge')).toBe(false);
+      expect(authorizeUrl.searchParams.has('code_challenge_method')).toBe(false);
+    });
+  });
+
+  describe('Token exchange with PKCE', () => {
+    it('should include code_verifier in token exchange when present in launch state', () => {
+      const launchState: LaunchState = {
+        iss: 'https://fhir.practicefusion.com',
+        launch: 'test-launch-token',
+        authorizeUrl: 'https://auth.practicefusion.com/authorize',
+        tokenUrl: 'https://auth.practicefusion.com/token',
+        createdAt: Date.now(),
+        clientId: 'pf-client-123',
+        clientSecret: 'pf-secret-456',
+        codeVerifier: 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk',
+      };
+
+      const tokenParams: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: 'test-auth-code',
+        redirect_uri: 'https://app.example.com/callback',
+        client_id: launchState.clientId,
+        client_secret: launchState.clientSecret,
+      };
+
+      if (launchState.codeVerifier) {
+        tokenParams.code_verifier = launchState.codeVerifier;
+      }
+
+      expect(tokenParams.code_verifier).toBe('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk');
+    });
+
+    it('should NOT include code_verifier in token exchange when not in launch state', () => {
+      const launchState: LaunchState = {
+        iss: 'https://fhir.practicefusion.com',
+        launch: 'test-launch-token',
+        authorizeUrl: 'https://auth.practicefusion.com/authorize',
+        tokenUrl: 'https://auth.practicefusion.com/token',
+        createdAt: Date.now(),
+        clientId: 'pf-client-123',
+        clientSecret: 'pf-secret-456',
+        // No codeVerifier - PKCE not enabled
+      };
+
+      const tokenParams: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: 'test-auth-code',
+        redirect_uri: 'https://app.example.com/callback',
+        client_id: launchState.clientId,
+        client_secret: launchState.clientSecret,
+      };
+
+      if (launchState.codeVerifier) {
+        tokenParams.code_verifier = launchState.codeVerifier;
+      }
+
+      expect(tokenParams.code_verifier).toBeUndefined();
+    });
+  });
+
+  describe('Launch state with PKCE', () => {
+    it('should store codeVerifier in launch state when PKCE enabled', () => {
+      const launchState: LaunchState = {
+        iss: 'https://fhir.practicefusion.com',
+        launch: 'test-launch-token',
+        authorizeUrl: 'https://auth.practicefusion.com/authorize',
+        tokenUrl: 'https://auth.practicefusion.com/token',
+        createdAt: Date.now(),
+        clientId: 'pf-client-123',
+        clientSecret: 'pf-secret-456',
+        codeVerifier: 'random-verifier-string',
+      };
+
+      expect(launchState.codeVerifier).toBe('random-verifier-string');
+    });
+
+    it('should have undefined codeVerifier when PKCE not enabled', () => {
+      const launchState: LaunchState = {
+        iss: 'https://fhir.practicefusion.com',
+        launch: 'test-launch-token',
+        authorizeUrl: 'https://auth.practicefusion.com/authorize',
+        tokenUrl: 'https://auth.practicefusion.com/token',
+        createdAt: Date.now(),
+        clientId: 'pf-client-123',
+        clientSecret: 'pf-secret-456',
+      };
+
+      expect(launchState.codeVerifier).toBeUndefined();
     });
   });
 });

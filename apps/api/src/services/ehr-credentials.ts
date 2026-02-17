@@ -23,6 +23,7 @@ export interface EhrCredentials {
   clientSecret: string;
   scopes: string;
   ehrName: string;
+  usePkce: boolean;
 }
 
 interface EhrConfig {
@@ -31,6 +32,7 @@ interface EhrConfig {
   clientId: () => string | undefined;
   clientSecret: () => string | undefined;
   scopes: () => string | undefined;
+  usePkce: () => boolean; // Opt-in per EHR via {PREFIX}_USE_PKCE env var
 }
 
 /**
@@ -48,6 +50,7 @@ const EHR_CONFIGS: EhrConfig[] = [
     clientId: () => process.env.PF_CLIENT_ID,
     clientSecret: () => process.env.PF_CLIENT_SECRET,
     scopes: () => process.env.PF_SCOPES,
+    usePkce: () => process.env.PF_USE_PKCE === 'true',
   },
   {
     name: 'VERADIGM',
@@ -55,6 +58,7 @@ const EHR_CONFIGS: EhrConfig[] = [
     clientId: () => process.env.VERADIGM_CLIENT_ID,
     clientSecret: () => process.env.VERADIGM_CLIENT_SECRET,
     scopes: () => process.env.VERADIGM_SCOPES,
+    usePkce: () => process.env.VERADIGM_USE_PKCE === 'true',
   },
   // Add more EHR systems here as needed:
   // {
@@ -63,6 +67,7 @@ const EHR_CONFIGS: EhrConfig[] = [
   //   clientId: () => process.env.EPIC_CLIENT_ID,
   //   clientSecret: () => process.env.EPIC_CLIENT_SECRET,
   //   scopes: () => process.env.EPIC_SCOPES,
+  //   usePkce: () => process.env.EPIC_USE_PKCE === 'true',
   // },
 ];
 
@@ -123,6 +128,7 @@ export function getCredentialsForIssuer(iss: string): EhrCredentials {
     clientSecret,
     scopes,
     ehrName: config.name,
+    usePkce: config.usePkce(),
   };
 }
 

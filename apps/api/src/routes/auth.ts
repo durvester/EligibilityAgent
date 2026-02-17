@@ -22,6 +22,7 @@ import { auditLogin, auditLogout } from '../services/audit-service.js';
 import { getRequiredEnv } from '../lib/validate-env.js';
 import { sessionMiddleware } from '../middleware/session.js';
 import { getCredentialsForIssuer } from '../services/ehr-credentials.js';
+import { generateCodeVerifier, generateCodeChallenge } from '../lib/pkce.js';
 
 interface LaunchQuery {
   iss: string;
@@ -54,6 +55,7 @@ interface LaunchState {
   createdAt: number;
   clientId: string;
   clientSecret: string;
+  codeVerifier?: string;
 }
 
 // In-memory state store (use Redis in production for multi-instance)
@@ -282,6 +284,14 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      // Generate PKCE parameters if enabled for this EHR
+      let codeVerifier: string | undefined;
+      let codeChallenge: string | undefined;
+      if (credentials.usePkce) {
+        codeVerifier = generateCodeVerifier();
+        codeChallenge = generateCodeChallenge(codeVerifier);
+      }
+
       // Generate state for CSRF protection
       const state = uuid();
       stateStore.set(state, {
@@ -292,6 +302,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         createdAt: Date.now(),
         clientId: credentials.clientId,
         clientSecret: credentials.clientSecret,
+        codeVerifier,
       });
 
       // Clean up old states (older than 10 minutes)
@@ -314,6 +325,12 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       authorizeUrl.searchParams.set('state', state);
       authorizeUrl.searchParams.set('launch', launch);
       authorizeUrl.searchParams.set('aud', iss);
+
+      // Add PKCE challenge if enabled
+      if (codeChallenge) {
+        authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+        authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+      }
 
       fastify.log.info({ authorizeUrl: authorizeUrl.toString() }, 'Redirecting to authorization');
 
@@ -369,15 +386,22 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
     try {
       // Exchange code for token using credentials from launch state
+      const tokenParams: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+        client_id: launchState.clientId,
+        client_secret: launchState.clientSecret,
+      };
+
+      // Include PKCE verifier if present in launch state
+      if (launchState.codeVerifier) {
+        tokenParams.code_verifier = launchState.codeVerifier;
+      }
+
       const tokenResponse = await axios.post(
         launchState.tokenUrl,
-        new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: redirectUri,
-          client_id: launchState.clientId,
-          client_secret: launchState.clientSecret,
-        }),
+        new URLSearchParams(tokenParams),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           timeout: 30000,
@@ -499,15 +523,22 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
 
     try {
       // Exchange code for token using credentials from launch state
+      const tokenParams: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+        client_id: launchState.clientId,
+        client_secret: launchState.clientSecret,
+      };
+
+      // Include PKCE verifier if present in launch state
+      if (launchState.codeVerifier) {
+        tokenParams.code_verifier = launchState.codeVerifier;
+      }
+
       const tokenResponse = await axios.post(
         launchState.tokenUrl,
-        new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: redirectUri,
-          client_id: launchState.clientId,
-          client_secret: launchState.clientSecret,
-        }),
+        new URLSearchParams(tokenParams),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           timeout: 30000,

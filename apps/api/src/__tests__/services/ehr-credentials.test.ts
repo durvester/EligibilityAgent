@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals
 const originalEnv = process.env;
 
 // Import after environment is set up
-let getCredentialsForIssuer: (iss: string) => { clientId: string; clientSecret: string; scopes: string; ehrName: string };
+let getCredentialsForIssuer: (iss: string) => { clientId: string; clientSecret: string; scopes: string; ehrName: string; usePkce: boolean };
 let validateEhrCredentials: () => string[];
 
 beforeEach(async () => {
@@ -399,6 +399,68 @@ describe('regression tests', () => {
         const result = getCredentialsForIssuer(url);
         expect(result.ehrName).toBe('VERADIGM');
       });
+    });
+  });
+});
+
+describe('usePkce flag', () => {
+  describe('Practice Fusion PKCE', () => {
+    beforeEach(() => {
+      process.env.PF_CLIENT_ID = 'pf-client-123';
+      process.env.PF_CLIENT_SECRET = 'pf-secret-456';
+      process.env.PF_SCOPES = 'launch openid fhirUser';
+    });
+
+    it('should return usePkce false by default (no env var)', async () => {
+      const result = getCredentialsForIssuer('https://fhir.practicefusion.com');
+
+      expect(result.usePkce).toBe(false);
+    });
+
+    it('should return usePkce true when PF_USE_PKCE=true', async () => {
+      process.env.PF_USE_PKCE = 'true';
+
+      const result = getCredentialsForIssuer('https://fhir.practicefusion.com');
+
+      expect(result.usePkce).toBe(true);
+    });
+
+    it('should return usePkce false when PF_USE_PKCE=false', async () => {
+      process.env.PF_USE_PKCE = 'false';
+
+      const result = getCredentialsForIssuer('https://fhir.practicefusion.com');
+
+      expect(result.usePkce).toBe(false);
+    });
+
+    it('should return usePkce false for non-"true" values', async () => {
+      process.env.PF_USE_PKCE = 'yes';
+
+      const result = getCredentialsForIssuer('https://fhir.practicefusion.com');
+
+      expect(result.usePkce).toBe(false);
+    });
+  });
+
+  describe('Veradigm PKCE', () => {
+    beforeEach(() => {
+      process.env.VERADIGM_CLIENT_ID = 'veradigm-client-789';
+      process.env.VERADIGM_CLIENT_SECRET = 'veradigm-secret-012';
+      process.env.VERADIGM_SCOPES = 'launch openid fhirUser';
+    });
+
+    it('should return usePkce false by default', async () => {
+      const result = getCredentialsForIssuer('https://fhir.allscripts.com');
+
+      expect(result.usePkce).toBe(false);
+    });
+
+    it('should return usePkce true when VERADIGM_USE_PKCE=true', async () => {
+      process.env.VERADIGM_USE_PKCE = 'true';
+
+      const result = getCredentialsForIssuer('https://fhir.allscripts.com');
+
+      expect(result.usePkce).toBe(true);
     });
   });
 });
