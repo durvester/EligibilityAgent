@@ -24,6 +24,7 @@ import { serviceLogger } from '../lib/logger.js';
  */
 const ALLOWED_FHIR_DOMAINS = [
   'practicefusion.com',
+  'allscripts.com',
   'localhost', // Development only
 ];
 
