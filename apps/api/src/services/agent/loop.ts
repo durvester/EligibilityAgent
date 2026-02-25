@@ -140,7 +140,7 @@ export async function* runEligibilityAgent(
 
   // Initialize Anthropic client with error handling
   try {
-    client = new Anthropic();
+    client = new Anthropic({ maxRetries: 3 });
   } catch (error) {
     serviceLogger.error({ error }, 'Failed to initialize Anthropic client');
     yield {
@@ -273,22 +273,16 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
 
       turnCount++;
 
-      // Create streaming request with extended thinking
-      const stream = client.messages.stream({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 16000, // Must be > budget_tokens
-        thinking: {
-          type: 'enabled',
-          budget_tokens: AGENT_LIMITS.THINKING_BUDGET_TOKENS,
-        },
-        system: ELIGIBILITY_SYSTEM_PROMPT,
-        tools: TOOLS,
-        messages,
-      });
+      // Create streaming request with retry for mid-stream overload errors.
+      // The SDK handles HTTP-level retries (429/5xx), but the API can also
+      // return an overloaded_error as an SSE event after the stream opens.
+      const MAX_STREAM_RETRIES = 2;
+      let streamRetry = 0;
+      let streamSuccess = false;
 
       // Track content blocks as they complete
-      const contentBlocks: ContentBlock[] = [];
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      let contentBlocks: ContentBlock[] = [];
+      let toolResults: Anthropic.ToolResultBlockParam[] = [];
 
       // Track current block state for streaming
       let currentBlockIndex = -1;
@@ -300,155 +294,208 @@ ${input.cardImage ? 'An insurance card image is attached. Extract payer name, me
       let accumulatedBlockText = ''; // Text for current block only
       let thinkingSignature: string | undefined;
 
-      // Process streaming events
-      for await (const event of stream as AsyncIterable<RawMessageStreamEvent>) {
-        if (event.type === 'content_block_start') {
-          currentBlockIndex = event.index;
-          currentBlockType = event.content_block.type;
+      while (!streamSuccess && streamRetry <= MAX_STREAM_RETRIES) {
+        if (streamRetry > 0) {
+          // Reset state for retry
+          contentBlocks = [];
+          toolResults = [];
+          currentBlockIndex = -1;
+          currentBlockType = null;
+          currentToolName = null;
+          currentToolId = null;
           accumulatedToolInput = '';
           accumulatedThinking = '';
           accumulatedBlockText = '';
           thinkingSignature = undefined;
 
-          if (event.content_block.type === 'tool_use') {
-            currentToolName = event.content_block.name;
-            currentToolId = event.content_block.id;
-            yield {
-              type: 'tool_start',
-              toolUseId: event.content_block.id,
-              tool: event.content_block.name,
-              input: {}, // Will be populated when block completes
-            };
-          }
-        } else if (event.type === 'content_block_delta') {
-          if (event.delta.type === 'thinking_delta') {
-            accumulatedThinking += event.delta.thinking;
-            // Stream thinking deltas immediately
-            yield {
-              type: 'thinking',
-              thinking: event.delta.thinking,
-            };
-          } else if (event.delta.type === 'signature_delta') {
-            thinkingSignature = (thinkingSignature || '') + event.delta.signature;
-          } else if (event.delta.type === 'text_delta') {
-            accumulatedBlockText += event.delta.text;
-            accumulatedText += event.delta.text; // Also track across all turns for JSON parsing
-            yield {
-              type: 'text',
-              text: event.delta.text,
-            };
-          } else if (event.delta.type === 'input_json_delta') {
-            accumulatedToolInput += event.delta.partial_json;
-          }
-        } else if (event.type === 'content_block_stop') {
-          // Block is complete - add to contentBlocks
-          if (currentBlockType === 'thinking') {
-            // Create thinking block with signature for multi-turn
-            const thinkingBlock: ThinkingBlock = {
-              type: 'thinking',
-              thinking: accumulatedThinking,
-              signature: thinkingSignature || '',
-            };
-            contentBlocks.push(thinkingBlock);
-          } else if (currentBlockType === 'text') {
-            const textBlock: TextBlock = {
-              type: 'text',
-              text: accumulatedBlockText,
-              citations: null, // No citations for agent text output
-            };
-            contentBlocks.push(textBlock);
-          } else if (currentBlockType === 'tool_use' && currentToolId && currentToolName) {
-            // Parse accumulated JSON input
-            let toolInput: Record<string, unknown> = {};
-            try {
-              if (accumulatedToolInput) {
-                toolInput = JSON.parse(accumulatedToolInput);
-              }
-            } catch {
-              serviceLogger.warn({ toolInput: accumulatedToolInput }, 'Failed to parse tool input JSON');
-            }
-
-            const toolUseBlock: ToolUseBlock = {
-              type: 'tool_use',
-              id: currentToolId,
-              name: currentToolName,
-              input: toolInput,
-            };
-            contentBlocks.push(toolUseBlock);
-
-            // Execute the tool
-            let finalToolInput = toolInput;
-
-            // Special handling for discover_insurance
-            if (currentToolName === 'discover_insurance') {
-              finalToolInput = {
-                firstName: toolInput.firstName,
-                lastName: toolInput.lastName,
-                dateOfBirth: toolInput.dateOfBirth,
-                providerNpi: toolInput.providerNpi,
-                address: toolInput.street ? {
-                  street: toolInput.street,
-                  city: toolInput.city,
-                  state: toolInput.state,
-                  zipCode: toolInput.zipCode,
-                } : undefined,
-                ssn: toolInput.ssn,
-                gender: toolInput.gender,
-              };
-            }
-
-            const result = await executeTool(currentToolName, finalToolInput);
-
-            // Check if this is an eligibility result
-            const resultData = result?.data as Record<string, unknown> | undefined;
-            if (result?.success && resultData?.status) {
-              eligibilityResult = resultData as unknown as EligibilityResponse;
-            }
-
-            yield {
-              type: 'tool_end',
-              toolUseId: currentToolId,
-              tool: currentToolName,
-              input: toolInput, // Include parsed input for UI display
-              result,
-            };
-
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: currentToolId,
-              content: JSON.stringify(result),
-            });
-          }
-
-          // Reset current block state
-          currentBlockType = null;
-          currentToolName = null;
-          currentToolId = null;
+          // Exponential backoff: 1s, 2s
+          const backoffMs = 1000 * Math.pow(2, streamRetry - 1);
+          serviceLogger.warn({ streamRetry, backoffMs }, 'Retrying after stream overload error');
+          yield { type: 'thinking', thinking: 'API was temporarily overloaded, retrying...' };
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
         }
-      }
 
-      // Get final message for usage stats and stop reason
-      const finalMessage = await stream.finalMessage();
-      totalInputTokens += finalMessage.usage.input_tokens;
-      totalOutputTokens += finalMessage.usage.output_tokens;
+        try {
+          const stream = client.messages.stream({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 16000, // Must be > budget_tokens
+            thinking: {
+              type: 'enabled',
+              budget_tokens: AGENT_LIMITS.THINKING_BUDGET_TOKENS,
+            },
+            system: ELIGIBILITY_SYSTEM_PROMPT,
+            tools: TOOLS,
+            messages,
+          });
 
-      // Add assistant response to messages (preserving thinking blocks for multi-turn)
-      messages.push({ role: 'assistant', content: contentBlocks });
+          // Process streaming events
+          for await (const event of stream as AsyncIterable<RawMessageStreamEvent>) {
+            if (event.type === 'content_block_start') {
+              currentBlockIndex = event.index;
+              currentBlockType = event.content_block.type;
+              accumulatedToolInput = '';
+              accumulatedThinking = '';
+              accumulatedBlockText = '';
+              thinkingSignature = undefined;
 
-      // If there were tool calls, add the results and continue
-      if (toolResults.length > 0) {
-        messages.push({ role: 'user', content: toolResults });
-      }
+              if (event.content_block.type === 'tool_use') {
+                currentToolName = event.content_block.name;
+                currentToolId = event.content_block.id;
+                yield {
+                  type: 'tool_start',
+                  toolUseId: event.content_block.id,
+                  tool: event.content_block.name,
+                  input: {}, // Will be populated when block completes
+                };
+              }
+            } else if (event.type === 'content_block_delta') {
+              if (event.delta.type === 'thinking_delta') {
+                accumulatedThinking += event.delta.thinking;
+                // Stream thinking deltas immediately
+                yield {
+                  type: 'thinking',
+                  thinking: event.delta.thinking,
+                };
+              } else if (event.delta.type === 'signature_delta') {
+                thinkingSignature = (thinkingSignature || '') + event.delta.signature;
+              } else if (event.delta.type === 'text_delta') {
+                accumulatedBlockText += event.delta.text;
+                accumulatedText += event.delta.text; // Also track across all turns for JSON parsing
+                yield {
+                  type: 'text',
+                  text: event.delta.text,
+                };
+              } else if (event.delta.type === 'input_json_delta') {
+                accumulatedToolInput += event.delta.partial_json;
+              }
+            } else if (event.type === 'content_block_stop') {
+              // Block is complete - add to contentBlocks
+              if (currentBlockType === 'thinking') {
+                // Create thinking block with signature for multi-turn
+                const thinkingBlock: ThinkingBlock = {
+                  type: 'thinking',
+                  thinking: accumulatedThinking,
+                  signature: thinkingSignature || '',
+                };
+                contentBlocks.push(thinkingBlock);
+              } else if (currentBlockType === 'text') {
+                const textBlock: TextBlock = {
+                  type: 'text',
+                  text: accumulatedBlockText,
+                  citations: null, // No citations for agent text output
+                };
+                contentBlocks.push(textBlock);
+              } else if (currentBlockType === 'tool_use' && currentToolId && currentToolName) {
+                // Parse accumulated JSON input
+                let toolInput: Record<string, unknown> = {};
+                try {
+                  if (accumulatedToolInput) {
+                    toolInput = JSON.parse(accumulatedToolInput);
+                  }
+                } catch {
+                  serviceLogger.warn({ toolInput: accumulatedToolInput }, 'Failed to parse tool input JSON');
+                }
 
-      // Check if we should stop
-      if (finalMessage.stop_reason === 'end_turn' || finalMessage.stop_reason === 'stop_sequence') {
-        break;
-      }
+                const toolUseBlock: ToolUseBlock = {
+                  type: 'tool_use',
+                  id: currentToolId,
+                  name: currentToolName,
+                  input: toolInput,
+                };
+                contentBlocks.push(toolUseBlock);
 
-      // If no tool use and not end_turn, something unexpected happened
-      if (toolResults.length === 0 && finalMessage.stop_reason !== 'tool_use') {
-        break;
-      }
+                // Execute the tool
+                let finalToolInput = toolInput;
+
+                // Special handling for discover_insurance
+                if (currentToolName === 'discover_insurance') {
+                  finalToolInput = {
+                    firstName: toolInput.firstName,
+                    lastName: toolInput.lastName,
+                    dateOfBirth: toolInput.dateOfBirth,
+                    providerNpi: toolInput.providerNpi,
+                    address: toolInput.street ? {
+                      street: toolInput.street,
+                      city: toolInput.city,
+                      state: toolInput.state,
+                      zipCode: toolInput.zipCode,
+                    } : undefined,
+                    ssn: toolInput.ssn,
+                    gender: toolInput.gender,
+                  };
+                }
+
+                const result = await executeTool(currentToolName, finalToolInput);
+
+                // Check if this is an eligibility result
+                const resultData = result?.data as Record<string, unknown> | undefined;
+                if (result?.success && resultData?.status) {
+                  eligibilityResult = resultData as unknown as EligibilityResponse;
+                }
+
+                yield {
+                  type: 'tool_end',
+                  toolUseId: currentToolId,
+                  tool: currentToolName,
+                  input: toolInput, // Include parsed input for UI display
+                  result,
+                };
+
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: currentToolId,
+                  content: JSON.stringify(result),
+                });
+              }
+
+              // Reset current block state
+              currentBlockType = null;
+              currentToolName = null;
+              currentToolId = null;
+            }
+          }
+
+          // Get final message for usage stats and stop reason
+          const finalMessage = await stream.finalMessage();
+          totalInputTokens += finalMessage.usage.input_tokens;
+          totalOutputTokens += finalMessage.usage.output_tokens;
+
+          // Add assistant response to messages (preserving thinking blocks for multi-turn)
+          messages.push({ role: 'assistant', content: contentBlocks });
+
+          // If there were tool calls, add the results and continue
+          if (toolResults.length > 0) {
+            messages.push({ role: 'user', content: toolResults });
+          }
+
+          streamSuccess = true;
+
+          // Check if we should stop
+          if (finalMessage.stop_reason === 'end_turn' || finalMessage.stop_reason === 'stop_sequence') {
+            break;
+          }
+
+          // If no tool use and not end_turn, something unexpected happened
+          if (toolResults.length === 0 && finalMessage.stop_reason !== 'tool_use') {
+            break;
+          }
+
+        } catch (streamError) {
+          // Check if this is a retryable overload/rate limit error
+          const errorMsg = streamError instanceof Error ? streamError.message : String(streamError);
+          const isOverloaded = errorMsg.includes('overloaded') || errorMsg.includes('Overloaded') ||
+                               errorMsg.includes('529') || errorMsg.includes('rate_limit');
+
+          if (isOverloaded && streamRetry < MAX_STREAM_RETRIES) {
+            streamRetry++;
+            serviceLogger.warn({ streamRetry, error: errorMsg }, 'Stream failed with retryable error');
+            continue; // Retry the stream
+          }
+
+          // Non-retryable or retries exhausted - re-throw
+          throw streamError;
+        }
+      } // end stream retry while loop
     }
 
     // Parse agent's structured JSON output from accumulated text
