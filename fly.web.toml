@@ -3,9 +3,6 @@ primary_region = "iad"
 
 [build]
   dockerfile = "apps/web/Dockerfile"
-  [build.args]
-    NEXT_PUBLIC_API_URL = "https://eligibility-api.fly.dev"
-    API_URL = "https://eligibility-api.fly.dev"
 
 [env]
   PORT = "3000"
